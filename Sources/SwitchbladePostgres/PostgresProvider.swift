@@ -7,8 +7,6 @@
 
 import Foundation
 
-#if os(Linux) || os(macOS)
-
 import Dispatch
 import CryptoSwift
 import PostgresKit
@@ -16,7 +14,7 @@ import Switchblade
 
 internal let kSaltValue = "dfc0e63c6cfd433087055cea149efb1f"
 
-class PostgresProvider: DataProvider {
+public class PostgresProvider: DataProvider {
     
     public var config: SwitchbladeConfig!
     public weak var blade: Switchblade!
@@ -433,5 +431,3 @@ class PostgresProvider: DataProvider {
     }
     
 }
-
-#endif
