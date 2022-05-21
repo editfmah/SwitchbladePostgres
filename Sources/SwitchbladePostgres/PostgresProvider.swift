@@ -12,11 +12,19 @@ import CryptoSwift
 import PostgresKit
 import Switchblade
 
+var ttl_now: Int {
+    get {
+        return Int(Date().timeIntervalSince1970)
+    }
+}
+
 internal let kSaltValue = "dfc0e63c6cfd433087055cea149efb1f"
+
 
 public class PostgresProvider: DataProvider {
     
     public var config: SwitchbladeConfig!
+    public var dataTableName = "Data"
     public weak var blade: Switchblade!
     
     fileprivate var connectionString: String!
@@ -29,9 +37,13 @@ public class PostgresProvider: DataProvider {
     var eventLoopGroup: EventLoopGroup!
     var pool: EventLoopGroupConnectionPool<PostgresConnectionSource>!
     
-    public init(connectionString: String)  {
+    public init(connectionString: String, config: SwitchbladeConfig)  {
         
         self.connectionString = connectionString
+        self.config = config
+        if config.randomiseDataTableName {
+            self.dataTableName = "\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(8))"
+        }
         
     }
     
@@ -48,30 +60,28 @@ public class PostgresProvider: DataProvider {
             on: self.eventLoopGroup
         )
         
-        try execute(sql: "CREATE TABLE IF NOT EXISTS Data (id bytea PRIMARY KEY, value bytea);", params: [])
-        try execute(sql: "CREATE TABLE IF NOT EXISTS Records (id bytea PRIMARY KEY, keyspace bytea);", params: [])
-        try execute(sql: "CREATE TABLE IF NOT EXISTS QueryableData (recid bytea PRIMARY KEY, id bytea, keyspace bytea, key TEXT, value bytea);", params: [])
+        try execute(sql: """
+CREATE TABLE IF NOT EXISTS \(dataTableName) (
+    partition text,
+    keyspace text,
+    id text,
+    value bytea,
+    ttl int,
+    timestamp int,
+    PRIMARY KEY (partition,keyspace,id)
+);
+""", params: [])
         
+        // indexes
+        try execute(sql: "CREATE INDEX IF NOT EXISTS idx_ttl ON \(dataTableName) (ttl);", params: [])
     }
     
     public func close() throws {
         pool.shutdown()
     }
     
-    fileprivate func makeId(_ key: Data,_ keyspace: Data) -> Data {
-        var id = Data(key)
-        id.append(keyspace)
-        return id.sha224()
-    }
-    
-    fileprivate func hashParam(_ key: Data,_ paramValue: Any?) -> Data {
-        var hash = key
-        if let value = paramValue as? Date {
-            hash += Data("\(value.timeIntervalSince1970)".bytes)
-        } else if let value = paramValue {
-            hash += Data("\(value)".bytes)
-        }
-        return hash.sha256()
+    fileprivate func makeId(_ key: String) -> String {
+        return key
     }
     
     public func execute(sql: String, params:[Any?]) throws {
@@ -81,6 +91,10 @@ public class PostgresProvider: DataProvider {
             if let p = p {
                 if let value = p as? Data {
                     values.append(PostgresData(bytes: value))
+                } else if let value = p as? String {
+                    values.append(PostgresData(string: value))
+                } else if let value = p as? Int {
+                    values.append(PostgresData(int: value))
                 } else {
                     values.append(PostgresData.null)
                 }
@@ -102,6 +116,62 @@ public class PostgresProvider: DataProvider {
         
     }
     
+    fileprivate func iterate<T:Codable>(sql: String, params:[Any?], iterator: ( (T) -> Void)) {
+        
+        var values: [PostgresData] = []
+        for p in params {
+            if let p = p {
+                if let value = p as? Data {
+                    values.append(PostgresData(bytes: value))
+                } else if let value = p as? String {
+                    values.append(PostgresData(string: value))
+                } else if let value = p as? Int {
+                    values.append(PostgresData(int: value))
+                } else {
+                    values.append(PostgresData.null)
+                }
+            } else {
+                values.append(PostgresData.null)
+            }
+        }
+        
+        do {
+            
+            let rows = try pool.withConnection { conn in
+                return conn.query(sql, values)
+            }.wait()
+            
+            for r in rows {
+                if let d = r.column("value")?.bytes {
+                    if config.aes256encryptionKey == nil {
+                        if let object = try? decoder.decode(T.self, from: Data(d)) {
+                            iterator(object)
+                        }
+                    } else {
+                        // this data is to be stored encrypted
+                        if let encKey = config.aes256encryptionKey {
+                            let key = encKey.sha256()
+                            let iv = (encKey + Data(kSaltValue.bytes)).md5()
+                            do {
+                                let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
+                                let objectData = try aes.decrypt(d)
+                                if let object = try? decoder.decode(T.self, from: Data(bytes: objectData, count: objectData.count)) {
+                                    iterator(object)
+                                }
+                            } catch {
+                                print("encryption error: \(error)")
+                            }
+                        }
+                    }
+                }
+            }
+            
+        } catch {
+            print(error)
+        }
+        
+    }
+    
     fileprivate func query(sql: String, params:[Any?]) throws -> [Data?] {
         
         var results: [Data?] = []
@@ -111,6 +181,10 @@ public class PostgresProvider: DataProvider {
             if let p = p {
                 if let value = p as? Data {
                     values.append(PostgresData(bytes: value))
+                } else if let value = p as? String {
+                    values.append(PostgresData(string: value))
+                } else if let value = p as? Int {
+                    values.append(PostgresData(int: value))
                 } else {
                     values.append(PostgresData.null)
                 }
@@ -143,63 +217,31 @@ public class PostgresProvider: DataProvider {
     }
     
     public func transact(_ mode: transaction) -> Bool {
-        do {
-            return true
-        } catch {
-            return false
-        }
+        return true
     }
     
     /*
      *      insert into dummy(id, name, size) values(1, 'new_name', 3)
-                on conflict(id)
-                do update set name = 'new_name', size = 3;
+     on conflict(id)
+     do update set name = 'new_name', size = 3;
      */
     
-    func put(key: Data, keyspace: Data, object: Data?, queryKeys: [Data]?) -> Bool {
-        
-        let id = makeId(key, keyspace)
-        do {
-            if config.aes256encryptionKey == nil {
-                try execute(sql: "INSERT INTO Data (id,value) VALUES ($1,$2) ON CONFLICT(id) DO UPDATE SET value = $3;", params: [id,object,object])
-            } else {
-                // this data is to be stored encrypted
-                if let encKey = config.aes256encryptionKey {
-                    let key = encKey.sha256()
-                    let iv = (encKey + Data(kSaltValue.bytes)).md5()
-                    do {
-                        let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                        // look at dealing with null assignment here
-                        let encryptedData = Data(try aes.encrypt(object!.bytes))
-                        try execute(sql: "INSERT INTO Data (id,value) VALUES ($1,$2) ON CONFLICT(id) DO UPDATE SET value = $3;", params: [id,encryptedData,encryptedData])
-                    } catch {
-                        assertionFailure("encryption error: \(error)")
-                    }
-                }
-            }
-            
-            try execute(sql: "INSERT INTO Records (id,keyspace) VALUES ($1,$2) ON CONFLICT(id) DO UPDATE SET keyspace = $3;", params: [id,keyspace, keyspace])
-            if let queryKeys = queryKeys {
-                //QueriableData (id BLOB PRIMARY KEY, keyspace BLOB, key TEXT, value TEXT)
-                try? execute(sql: "DELETE FROM QueryableData WHERE id = $1;", params: [id])
-                for k in queryKeys {
-                    try? execute(sql: "INSERT INTO QueryableData (recid,id,keyspace,key) VALUES ($1,$2,$3,$4);", params: [UUID().asData(),id,keyspace,k])
-                }
-            }
-            return true
-        } catch {
-            return false
-        }
-        
-    }
-    
-    public func put<T>(key: Data, keyspace: Data, _ object: T) -> Bool where T : Decodable, T : Encodable {
+    public func put<T>(partition: String, key: String, keyspace: String, ttl: Int, _ object: T) -> Bool where T : Decodable, T : Encodable {
         
         if let jsonObject = try? JSONEncoder().encode(object) {
-            let id = makeId(key, keyspace)
+            let id = makeId(key)
             do {
                 if config.aes256encryptionKey == nil {
-                    try execute(sql: "INSERT INTO Data (id,value) VALUES ($1,$2) ON CONFLICT(id) DO UPDATE SET value = $3;", params: [id,jsonObject,jsonObject])
+                    try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9;",
+                                params: [
+                                    partition,
+                                    keyspace,
+                                    id,
+                                    jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
+                                    Int(Date().timeIntervalSince1970),
+                                    jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
+                                    Int(Date().timeIntervalSince1970)
+                                ])
                 } else {
                     // this data is to be stored encrypted
                     if let encKey = config.aes256encryptionKey {
@@ -208,27 +250,22 @@ public class PostgresProvider: DataProvider {
                         do {
                             let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
                             let encryptedData = Data(try aes.encrypt(jsonObject.bytes))
-                            try execute(sql: "INSERT INTO Data (id,value) VALUES ($1,$1) ON CONFLICT(id) DO UPDATE SET value = $3;", params: [id,encryptedData,encryptedData])
+                            try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9;",
+                                        params: [
+                                            partition,
+                                            keyspace,
+                                            id,
+                                            encryptedData,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
+                                            Int(Date().timeIntervalSince1970),
+                                            encryptedData,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
+                                            Int(Date().timeIntervalSince1970)
+                                        ])
                         } catch {
                             print("encryption error: \(error)")
                         }
                     }
                 }
                 
-                try execute(sql: "INSERT INTO Records (id,keyspace) VALUES ($1,$2) ON CONFLICT(id) DO UPDATE SET keyspace = $3;", params: [id,keyspace, keyspace])
-                if let queryableObject = object as? Queryable {
-                    //QueriableData (id BLOB PRIMARY KEY, keyspace BLOB, key TEXT, value TEXT)
-                    try? execute(sql: "DELETE FROM QueryableData WHERE id = $1;", params: [id])
-                    for kv in queryableObject.queryableItems {
-                        if config.hashQueriableProperties == false {
-                            try? execute(sql: "INSERT INTO QueryableData (recid,id,keyspace,key,value) VALUES ($1,$2,$3,$4,$5);", params: [UUID().asData(),id,keyspace,kv.key, kv.value])
-                        } else {
-                            // hash the key and value together so data can be queried, but remains anonymous
-                            let keyHash = hashParam(kv.key.data(using: .utf8)!, kv.value)
-                            try? execute(sql: "INSERT INTO QueryableData (recid,id,keyspace,key) VALUES ($1,$2,$3,$4);", params: [UUID().asData(),id,keyspace,keyHash])
-                        }
-                    }
-                }
                 return true
             } catch {
                 return false
@@ -237,12 +274,10 @@ public class PostgresProvider: DataProvider {
         return false
     }
     
-    public func delete(key: Data, keyspace: Data) -> Bool {
-        let id = makeId(key, keyspace)
+    
+    public func delete(partition: String, key: String, keyspace: String) -> Bool {
         do {
-            try execute(sql: "DELETE FROM QueryableData WHERE id = $1;", params: [id])
-            try execute(sql: "DELETE FROM Data WHERE id = $1;", params: [id])
-            try execute(sql: "DELETE FROM Records WHERE id = $1;", params: [id])
+            try execute(sql: "DELETE FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3;", params: [partition, keyspace, key])
             return true
         } catch {
             return false
@@ -250,16 +285,15 @@ public class PostgresProvider: DataProvider {
     }
     
     @discardableResult
-    public func get<T>(key: Data, keyspace: Data) -> T? where T : Decodable, T : Encodable {
-        let id = makeId(key, keyspace)
+    public func get<T>(partition: String, key: String, keyspace: String) -> T? where T : Decodable, T : Encodable {
         do {
             if config.aes256encryptionKey == nil {
-                if let data = try query(sql: "SELECT value FROM Data WHERE id = $1;", params: [id]).first, let objectData = data {
+                if let data = try query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data {
                     let object = try decoder.decode(T.self, from: objectData)
                     return object
                 }
             } else {
-                if let data = try query(sql: "SELECT value FROM Data WHERE id = $1", params: [id]).first, let objectData = data, let encKey = config.aes256encryptionKey {
+                if let data = try query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data, let encKey = config.aes256encryptionKey {
                     let key = encKey.sha256()
                     let iv = (encKey + Data(kSaltValue.bytes)).md5()
                     do {
@@ -277,7 +311,7 @@ public class PostgresProvider: DataProvider {
             debugPrint("SQLiteProvider Error:  Failed to decode stored object into type: \(T.self)")
             debugPrint("Error:")
             debugPrint(error)
-            if let data = try? query(sql: "SELECT value FROM Data WHERE id = $1", params: [id]).first, let objectData = data, let body = String(data: objectData, encoding: .utf8) {
+            if let data = try? query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectData = data, let body = String(data: objectData, encoding: .utf8) {
                 
                 debugPrint("Object data:")
                 debugPrint(body)
@@ -288,103 +322,22 @@ public class PostgresProvider: DataProvider {
     }
     
     @discardableResult
-    public func query<T>(keyspace: Data, params: [param]?) -> [T] where T : Decodable, T : Encodable {
+    public func query<T>(partition: String, keyspace: String, map where: ((T) -> Bool)) -> [T] where T : Decodable, T : Encodable {
         var results: [T] = []
-        var whereParams: [Any?] = []
-        // loop to see if there are any where conditions
-        var foundWhere = false
-        for p in params ?? [] {
-            switch p {
-            case .where(_, _, _):
-                foundWhere = true
-                break;
-            default:
-                break
+        
+        for result: T in all(partition: partition, keyspace: keyspace) {
+            if `where`(result) {
+                results.append(result)
             }
         }
-        var whereSql = ""
-        if foundWhere {
-            whereSql += " QueryableData AS QD0 "
-            var wheres: [String] = []
-            var idx = 0
-            for p in params ?? [] {
-                switch p {
-                case .where(let key, let op, let param):
-                    if idx > 0 {
-                        whereSql += " JOIN QueryableData AS QD\(idx) on QD\(idx-1).id = QD\(idx).id "
-                    }
-                    switch op {
-                    case .equals:
-                        if config.hashQueriableProperties {
-                            wheres.append("(QD\(idx).key = ?)")
-                            whereParams.append(hashParam(key.data(using: .utf8)!, param))
-                        } else {
-                            wheres.append("(QD\(idx).key = ? AND QD\(idx).value = ?)")
-                            whereParams.append(key)
-                            whereParams.append(param)
-                        }
-                    case .greater:
-                        wheres.append("(QD\(idx).key = ? AND QD\(idx).value > ?)")
-                        whereParams.append(key)
-                        whereParams.append(param)
-                    case .isnotnull:
-                        wheres.append("(QD\(idx).key = ? AND QD\(idx).value IS NOT NULL)")
-                        whereParams.append(key)
-                    case .isnull:
-                        wheres.append("(QD\(idx).key = ? AND QD\(idx).value IS NULL)")
-                        whereParams.append(key)
-                    case .less:
-                        wheres.append("(QD\(idx).key = ? AND QD\(idx).value < ?)")
-                        whereParams.append(key)
-                        whereParams.append(param)
-                    }
-                    idx += 1
-                    break;
-                default:
-                    break
-                }
-            }
-            
-            whereSql += " WHERE "
-            whereSql += wheres.joined(separator: " AND ")
-        }
-        do {
-            // urgh, this is complex, but works well in fact
-            // SELECT QD1.recid FROM QueriableData as QD1 JOIN QueriableData AS QD2 on QD1.recid = QD2.recid JOIN QueriableData AS QD3 on QD2.recid = QD3.recid WHERE (QD1.key = "age" AND QD1.value = 40) AND (QD2."key" = "name" AND QD2.value = "adrian") AND (QD3.key = "surname" AND QD3.value = "herridge")
-            let data = try query(sql: "SELECT value FROM Data WHERE id IN (SELECT QD0.id FROM \(whereSql) );", params: whereParams)
-            for d in data {
-                if config.aes256encryptionKey == nil {
-                    if let objectData = d, let object = try? decoder.decode(T.self, from: objectData) {
-                        results.append(object)
-                    }
-                } else {
-                    // this data is to be stored encrypted
-                    if let encKey = config.aes256encryptionKey {
-                        let key = encKey.sha256()
-                        let iv = (encKey + Data(kSaltValue.bytes)).md5()
-                        do {
-                            let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                            if let encryptedData = d {
-                                let objectData = try aes.decrypt(encryptedData.bytes)
-                                let object = try decoder.decode(T.self, from: Data(objectData))
-                                results.append(object)
-                            }
-                        } catch {
-                            print("encryption error: \(error)")
-                        }
-                    }
-                }
-            }
-            return results
-        } catch  {
-            return []
-        }
+        
+        return results
     }
     
     @discardableResult
-    public func all<T>(keyspace: Data) -> [T] where T : Decodable, T : Encodable {
+    public func all<T>(partition: String, keyspace: String) -> [T] where T : Decodable, T : Encodable {
         do {
-            let data = try query(sql: "SELECT value FROM Data WHERE id IN (SELECT id FROM Records WHERE keyspace = $1);", params: [keyspace])
+            let data = try query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
             var aggregation: [Data] = []
             for d in data {
                 if config.aes256encryptionKey == nil {
@@ -428,6 +381,12 @@ public class PostgresProvider: DataProvider {
         } catch  {
             return []
         }
+    }
+    
+    public func iterate<T>(partition: String, keyspace: String, iterator: ((T) -> Void)) where T : Decodable, T : Encodable {
+        
+        iterate(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now], iterator: iterator)
+        
     }
     
 }
