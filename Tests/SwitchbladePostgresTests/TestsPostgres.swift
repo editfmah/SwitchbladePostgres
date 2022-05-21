@@ -37,7 +37,7 @@ func initPostgresDatabase(_ config: SwitchbladeConfig? = nil) -> Switchblade {
         
         let config = SwitchbladeConfig()
         
-        db = try! Switchblade(provider: PostgresProvider(connectionString: "postgresql://doadmin:qfHq3o7UyaxJLsI3@db-postgresql-lon1-57094-do-user-2007468-0.b.db.ondigitalocean.com:25060/unit-tests?sslmode=require", config: config))
+        db = try! Switchblade(provider: PostgresProvider(connectionString: ""))
         
         let provider = db.provider as? PostgresProvider
         try? provider?.execute(sql: "DELETE FROM Data;", params: [])

@@ -37,13 +37,9 @@ public class PostgresProvider: DataProvider {
     var eventLoopGroup: EventLoopGroup!
     var pool: EventLoopGroupConnectionPool<PostgresConnectionSource>!
     
-    public init(connectionString: String, config: SwitchbladeConfig)  {
+    public init(connectionString: String)  {
         
         self.connectionString = connectionString
-        self.config = config
-        if config.randomiseDataTableName {
-            self.dataTableName = "\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(8))"
-        }
         
     }
     
