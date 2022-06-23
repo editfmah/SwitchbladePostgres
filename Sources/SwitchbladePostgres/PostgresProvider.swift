@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         
     }
     
-    fileprivate func query(sql: String, params:[Any?]) throws -> [Data?] {
+    public func query(sql: String, params:[Any?]) throws -> [Data?] {
         
         var results: [Data?] = []
         
