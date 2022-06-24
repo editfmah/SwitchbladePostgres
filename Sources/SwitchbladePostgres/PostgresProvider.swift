@@ -168,9 +168,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         
     }
     
-    public func query(sql: String, params:[Any?]) throws -> [Data?] {
+    public func query(sql: String, params:[Any?]) throws -> [(partition: String, keyspace: String, id: String, value: Data?)] {
         
-        var results: [Data?] = []
+        var results: [(partition: String, keyspace: String, id: String, value: Data?)] = []
         
         var values: [PostgresData] = []
         for p in params {
@@ -196,11 +196,11 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             }.wait()
             
             for r in rows {
-                if let d = r.column("value")?.bytes {
-                    results.append(Data(d))
-                } else {
-                    results.append(nil)
-                }
+                let p = r.column("partition")?.string ?? ""
+                let k = r.column("keyspace")?.string ?? ""
+                let id = r.column("id")?.string ?? ""
+                let val = Data(r.column("value")?.bytes ?? [])
+                results.append((partition: p, keyspace: k, id: id, value: val))
             }
             
         } catch {
@@ -284,12 +284,12 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     public func get<T>(partition: String, key: String, keyspace: String) -> T? where T : Decodable, T : Encodable {
         do {
             if config.aes256encryptionKey == nil {
-                if let data = try query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data {
+                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data.value {
                     let object = try decoder.decode(T.self, from: objectData)
                     return object
                 }
             } else {
-                if let data = try query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data, let encKey = config.aes256encryptionKey {
+                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data.value, let encKey = config.aes256encryptionKey {
                     let key = encKey.sha256()
                     let iv = (encKey + Data(kSaltValue.bytes)).md5()
                     do {
@@ -307,7 +307,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             debugPrint("SQLiteProvider Error:  Failed to decode stored object into type: \(T.self)")
             debugPrint("Error:")
             debugPrint(error)
-            if let data = try? query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectData = data, let body = String(data: objectData, encoding: .utf8) {
+            if let data = try? query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectData = data.value, let body = String(data: objectData, encoding: .utf8) {
                 
                 debugPrint("Object data:")
                 debugPrint(body)
@@ -333,9 +333,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     @discardableResult
     public func all<T>(partition: String, keyspace: String) -> [T] where T : Decodable, T : Encodable {
         do {
-            let data = try query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
+            let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
             var aggregation: [Data] = []
-            for d in data {
+            for d in data.map({ $0.value }) {
                 if config.aes256encryptionKey == nil {
                     if let objectData = d {
                         aggregation.append(objectData)
