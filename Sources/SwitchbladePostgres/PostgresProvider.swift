@@ -20,9 +20,8 @@ var ttl_now: Int {
 
 internal let kSaltValue = "dfc0e63c6cfd433087055cea149efb1f"
 
-
 public class PostgresProvider: DataProvider {
-    
+
     public var config: SwitchbladeConfig!
     public var dataTableName = "Data"
     public weak var blade: Switchblade!
@@ -64,12 +63,15 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     value bytea,
     ttl int,
     timestamp int,
+    model text,
+    version int,
     PRIMARY KEY (partition,keyspace,id)
 );
 """, params: [])
         
         // indexes
         try execute(sql: "CREATE INDEX IF NOT EXISTS idx_ttl ON \(dataTableName) (ttl);", params: [])
+        try execute(sql: "CREATE INDEX IF NOT EXISTS idx_model ON \(dataTableName) (model,version);", params: [])
     }
     
     public func close() throws {
@@ -108,6 +110,62 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         } catch {
             print(error)
             throw DatabaseError.Execute(.SyntaxError("\(error)"))
+        }
+        
+    }
+    
+    fileprivate func migrate<T:SWSchemaVersioned>(iterator: ( (T) -> SWSchemaVersioned?)) {
+        
+        let fromInfo = T.version
+
+        let sql = "SELECT value, partition, keyspace, id, ttl FROM \(dataTableName) WHERE model = $1 AND version = $2 AND (ttl IS NULL or ttl >= $3)"
+        
+        var values: [PostgresData] = [PostgresData(string: fromInfo.objectName), PostgresData(int: fromInfo.version), PostgresData(int: ttl_now)]
+        
+        do {
+            
+            let rows = try pool.withConnection { conn in
+                return conn.query(sql, values)
+            }.wait()
+            
+            for r in rows {
+                let partition = r.column("partition")?.string ?? ""
+                let keyspace = r.column("keyspace")?.string ?? ""
+                let id = r.column("id")?.string ?? ""
+                var ttl: Int? = nil
+                if let currentTTl = r.column("ttl")?.int {
+                    ttl = currentTTl - ttl_now
+                }
+                if let d = r.column("value")?.bytes {
+                    if config.aes256encryptionKey == nil {
+                        if let object = try? decoder.decode(T.self, from: Data(d)) {
+                            if let newObject = iterator(object) {
+                                let _ = self.put(partition: partition, key: id, keyspace: keyspace, ttl: ttl ?? -1, newObject)
+                            }
+                        }
+                    } else {
+                        // this data is to be stored encrypted
+                        if let encKey = config.aes256encryptionKey {
+                            let key = encKey.sha256()
+                            let iv = (encKey + Data(kSaltValue.bytes)).md5()
+                            do {
+                                let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
+                                let objectData = try aes.decrypt(d)
+                                if let object = try? decoder.decode(T.self, from: Data(bytes: objectData, count: objectData.count)) {
+                                    if let newObject = iterator(object) {
+                                        let _ = self.put(partition: partition, key: id, keyspace: keyspace, ttl: ttl ?? -1, newObject)
+                                    }
+                                }
+                            } catch {
+                                print("encryption error: \(error)")
+                            }
+                        }
+                    }
+                }
+            }
+            
+        } catch {
+            print(error)
         }
         
     }
@@ -216,6 +274,10 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         return true
     }
     
+    public func migrate<FromType: SWSchemaVersioned, ToType: SWSchemaVersioned>(from: FromType.Type, to: ToType.Type, migration: ((FromType) -> ToType?)) {
+        self.migrate(iterator: migration)
+    }
+    
     /*
      *      insert into dummy(id, name, size) values(1, 'new_name', 3)
      on conflict(id)
@@ -228,7 +290,15 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             let id = makeId(key)
             do {
                 if config.aes256encryptionKey == nil {
-                    try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9;",
+                    
+                    var model: String? = nil
+                    var version: Int? = nil
+                    if let info = (T.self as? SWSchemaVersioned.Type)?.version {
+                        model = info.objectName
+                        version = info.version
+                    }
+                    
+                    try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp,model,version) VALUES ($1,$2,$3,$4,$5,$6,$10,$11) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9, model = $12, version = $13;",
                                 params: [
                                     partition,
                                     keyspace,
@@ -236,7 +306,11 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                                     jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
                                     Int(Date().timeIntervalSince1970),
                                     jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
-                                    Int(Date().timeIntervalSince1970)
+                                    Int(Date().timeIntervalSince1970),
+                                    model,
+                                    version,
+                                    model,
+                                    version,
                                 ])
                 } else {
                     // this data is to be stored encrypted
@@ -246,7 +320,15 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                         do {
                             let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
                             let encryptedData = Data(try aes.encrypt(jsonObject.bytes))
-                            try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9;",
+                            
+                            var model: String? = nil
+                            var version: Int? = nil
+                            if let info = (T.self as? SWSchemaVersioned.Type)?.version {
+                                model = info.objectName
+                                version = info.version
+                            }
+                            
+                            try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp,model,version) VALUES ($1,$2,$3,$4,$5,$6,$10,$11) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9, model = $12, version = $13;",
                                         params: [
                                             partition,
                                             keyspace,
@@ -254,7 +336,11 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                                             encryptedData,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
                                             Int(Date().timeIntervalSince1970),
                                             encryptedData,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
-                                            Int(Date().timeIntervalSince1970)
+                                            Int(Date().timeIntervalSince1970),
+                                            model,
+                                            version,
+                                            model,
+                                            version,
                                         ])
                         } catch {
                             print("encryption error: \(error)")

@@ -31,6 +31,28 @@ public class Person : Codable, Identifiable, KeyspaceIdentifiable {
     
 }
 
+public class PersonVersion1 : Codable, SWSchemaVersioned {
+    
+    public static var version: (objectName: String, version: Int) = ("Person", 1)
+    
+    
+    public var id : UUID = UUID()
+    public var name: String?
+    public var age: Int?
+    
+}
+
+public class PersonVersion2 : Codable, SWSchemaVersioned {
+    
+    public static var version: (objectName: String, version: Int) = ("Person", 2)
+    
+    public var id : UUID = UUID()
+    public var forename: String?
+    public var surname: String?
+    public var age: Int?
+    
+}
+
 func initPostgresDatabase(_ config: SwitchbladeConfig? = nil) -> Switchblade {
     
     if db == nil {
@@ -623,6 +645,44 @@ extension SwitchbladePostgresTests {
         }
         
         XCTFail("failed to write one of the records")
+    }
+    
+    func testObjectMigration() {
+        
+        let db = initPostgresDatabase()
+        
+        let id = UUID()
+        
+        let p1 = PersonVersion1()
+        p1.id = id
+        p1.name = "Adrian Herridge"
+        p1.age = 40
+        
+        if db.put(key: id, p1) {
+            if let _: PersonVersion1 = db.get(key: id) {
+                db.migrate(from: PersonVersion1.self, to: PersonVersion2.self) { old in
+                    
+                    let new = PersonVersion2()
+                    
+                    new.id = old.id
+                    new.age = old.age
+                    
+                    let components = old.name?.components(separatedBy: " ")
+                    new.forename = components?.first
+                    new.surname = components?.last
+                    
+                    return new
+                }
+                if let updated: PersonVersion2 = db.get(key: id) {
+                    if updated.forename == "Adrian" && updated.surname == "Herridge" {
+                        return
+                    }
+                }
+            }
+        }
+        
+        XCTFail("failed to write one of the records")
+        
     }
     
 }
