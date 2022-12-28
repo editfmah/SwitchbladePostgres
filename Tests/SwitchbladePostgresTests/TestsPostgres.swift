@@ -31,7 +31,7 @@ public class Person : Codable, Identifiable, KeyspaceIdentifiable {
     
 }
 
-public class PersonVersion1 : Codable, SWSchemaVersioned {
+public class PersonVersion1 : Codable, SchemaVersioned {
     
     public static var version: (objectName: String, version: Int) = ("Person", 1)
     
@@ -42,7 +42,7 @@ public class PersonVersion1 : Codable, SWSchemaVersioned {
     
 }
 
-public class PersonVersion2 : Codable, SWSchemaVersioned {
+public class PersonVersion2 : Codable, SchemaVersioned {
     
     public static var version: (objectName: String, version: Int) = ("Person", 2)
     
@@ -50,6 +50,30 @@ public class PersonVersion2 : Codable, SWSchemaVersioned {
     public var forename: String?
     public var surname: String?
     public var age: Int?
+    
+}
+
+public class PersonFilterable : Codable, Filterable, Identifiable, KeyspaceIdentifiable {
+    
+    public var filters: [String : String] {
+        get {
+            return ["type" : "person", "age" : "\(self.Age ?? 0)", "name" : self.Name ?? ""]
+        }
+    }
+    
+    public var key: PrimaryKeyType {
+        return self.PersonId
+    }
+    
+    public var keyspace: String {
+        return "person"
+    }
+    
+    init(){ PersonId = UUID() }
+    public var PersonId : UUID
+    public var Name: String?
+    public var Age: Int?
+    public var DepartmentId : UUID?
     
 }
 
@@ -504,13 +528,13 @@ extension SwitchbladePostgresTests {
         
         p1.Name = "Adrian Herridge"
         p1.Age = 40
-        if db.put(partition: partition,["ad",1,"testing123"], ttl: nil,p1) {
+        if db.put(partition: partition,compositeKeys: ["ad",1,"testing123"], ttl: nil,p1) {
             p2.Name = "Neil Bostrom"
             p2.Age = 37
-            if db.put(partition: partition,["bozzer",2,"testing123"],ttl: nil,p2) {
+            if db.put(partition: partition,compositeKeys:["bozzer",2,"testing123"],ttl: nil,p2) {
                 p3.Name = "George Smith"
                 p3.Age = 28
-                if db.put(partition: partition,["george",3,"testing123"], ttl: nil, p3) {
+                if db.put(partition: partition,compositeKeys:["george",3,"testing123"], ttl: nil, p3) {
                     return
                 }
             }
@@ -529,8 +553,8 @@ extension SwitchbladePostgresTests {
         
         p1.Name = "Adrian Herridge"
         p1.Age = 40
-        if db.put(partition: partition, ["ad",1,123,"test",p1.PersonId],ttl: nil,p1) {
-            if let retrieved: Person = db.get(partition: partition, ["ad",1,123,"test",p1.PersonId]) {
+        if db.put(partition: partition, compositeKeys: ["ad",1,123,"test",p1.PersonId],ttl: nil,p1) {
+            if let retrieved: Person = db.get(partition: partition, compositeKeys:["ad",1,123,"test",p1.PersonId]) {
                 print("retrieved item with id \(retrieved.PersonId)")
                 if retrieved.PersonId == p1.PersonId {
                     return
@@ -682,6 +706,125 @@ extension SwitchbladePostgresTests {
         }
         
         XCTFail("failed to write one of the records")
+        
+    }
+    
+    func testFilterMultiple() {
+        
+        let db = initPostgresDatabase()
+        
+        
+        let p1 = Person()
+        p1.Name = "Adrian Herridge"
+        p1.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "123"], p1)
+        
+        let p2 = Person()
+        p2.Name = "Adrian Herridge"
+        p2.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true"], p2)
+        
+        let p3 = Person()
+        p3.Name = "Adrian Herridge"
+        p3.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "false"], p3)
+        
+        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true"])
+        if results.count == 2 {
+            return
+        }
+        
+        XCTFail("failed to write one of the records")
+        
+    }
+    
+    func testFilterMultipleAND() {
+        
+        let db = initPostgresDatabase()
+        
+        
+        let p1 = Person()
+        p1.Name = "Adrian Herridge"
+        p1.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "123"], p1)
+        
+        let p2 = Person()
+        p2.Name = "Adrian Herridge"
+        p2.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true"], p2)
+        
+        let p3 = Person()
+        p3.Name = "Adrian Herridge"
+        p3.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "false"], p3)
+        
+        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "123"])
+        if results.count == 1 {
+            return
+        }
+        
+        XCTFail("failed to write one of the records")
+        
+    }
+    
+    func testFilterMultipleNegative() {
+        
+        let db = initPostgresDatabase()
+        
+        
+        let p1 = Person()
+        p1.Name = "Adrian Herridge"
+        p1.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "1234"], p1)
+        
+        let p2 = Person()
+        p2.Name = "Adrian Herridge"
+        p2.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true"], p2)
+        
+        let p3 = Person()
+        p3.Name = "Adrian Herridge"
+        p3.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "false"], p3)
+        
+        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "123"])
+        if results.count == 0 {
+            return
+        }
+        
+        XCTFail("failed to write one of the records")
+        
+    }
+    
+    func testFilterProtocolConformance() {
+        
+        let db = initPostgresDatabase()
+        
+        
+        let p1 = PersonFilterable()
+        p1.Name = "Adrian Herridge"
+        p1.Age = 40
+        db.put(p1)
+        
+        let p2 = PersonFilterable()
+        p2.Name = "Neil Bostrom"
+        p2.Age = 40
+        db.put(p2)
+        
+        let p3 = PersonFilterable()
+        p3.Name = "Sarah Herridge"
+        p3.Age = 40
+        db.put(p3)
+        
+        let results: [PersonFilterable] = db.all(keyspace: "person", filter: ["age" : "40"])
+        if results.count != 3 {
+            XCTFail("failed to get the correct filtered records")
+        }
+        
+        let results2: [PersonFilterable] = db.all(keyspace: "person", filter: ["name" : "Neil Bostrom"])
+        if results2.count != 1 {
+            XCTFail("failed to get the correct filtered records")
+        }
         
     }
     
