@@ -303,7 +303,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         return true
     }
     
-    public func migrate<FromType: SchemaVersioned, ToType: SchemaVersioned>(from: FromType.Type, to: ToType.Type, migration: ((FromType) -> ToType?)) {
+    public func migrate<FromType: SchemaVersioned, ToType: SchemaVersioned>(from: FromType.Type, to: ToType.Type, migration: @escaping ((FromType) -> ToType?)) {
         self.migrate(iterator: migration)
     }
     
