@@ -57,9 +57,9 @@ public class PostgresProvider: DataProvider {
         
         try execute(sql: """
 CREATE TABLE IF NOT EXISTS \(dataTableName) (
-    partition bytea,
-    keyspace bytea,
-    id bytea,
+    partition text,
+    keyspace text,
+    id text,
     value bytea,
     ttl int,
     timestamp int,
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         pool.shutdown()
     }
     
-    fileprivate func makeId(_ key: Data) -> Data {
+    fileprivate func makeId(_ key: String) -> String {
         return key
     }
     
@@ -138,9 +138,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             }.wait()
             
             for r in rows {
-                let partition = Data(bytes: r.column("partition")?.bytes ?? [])
-                let keyspace = Data(bytes: r.column("keyspace")?.bytes ?? [])
-                let id = Data(bytes: r.column("id")?.bytes ?? [])
+                let partition = r.column("partition")?.string ?? ""
+                let keyspace = r.column("keyspace")?.string ?? ""
+                let id = r.column("id")?.string ?? ""
                 var ttl: Int? = nil
                 if let currentTTl = r.column("ttl")?.int {
                     ttl = currentTTl - ttl_now
@@ -255,9 +255,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         
     }
     
-    public func query(sql: String, params:[Any?]) throws -> [(partition: Data, keyspace: Data, id: Data, value: Data?)] {
+    public func query(sql: String, params:[Any?]) throws -> [(partition: String, keyspace: String, id: String, value: Data?)] {
         
-        var results: [(partition: Data, keyspace: Data, id: Data, value: Data?)] = []
+        var results: [(partition: String, keyspace: String, id: String, value: Data?)] = []
         
         var values: [PostgresData] = []
         for p in params {
@@ -283,9 +283,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             }.wait()
             
             for r in rows {
-                let p = Data(bytes: r.column("partition")?.bytes ?? [])
-                let k = Data(bytes: r.column("keyspace")?.bytes ?? [])
-                let id = Data(bytes: r.column("id")?.bytes ?? [])
+                let p = r.column("partition")?.string ?? ""
+                let k = r.column("keyspace")?.string ?? ""
+                let id = r.column("id")?.string ?? ""
                 let val = Data(r.column("value")?.bytes ?? [])
                 results.append((partition: p, keyspace: k, id: id, value: val))
             }
@@ -315,7 +315,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     
    
     
-    public func put<T>(partition: Data, key: Data, keyspace: Data, ttl: Int, filter: String, _ object: T) -> Bool where T : Decodable, T : Encodable {
+    public func put<T>(partition: String, key: String, keyspace: String, ttl: Int, filter: String, _ object: T) -> Bool where T : Decodable, T : Encodable {
         
         if let jsonObject = try? JSONEncoder().encode(object) {
             let id = makeId(key)
@@ -392,7 +392,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     }
     
     
-    public func delete(partition: Data, key: Data, keyspace: Data) -> Bool {
+    public func delete(partition: String, key: String, keyspace: String) -> Bool {
         do {
             try execute(sql: "DELETE FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3;", params: [partition, keyspace, key])
             return true
@@ -402,7 +402,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     }
     
     @discardableResult
-    public func get<T>(partition: Data, key: Data, keyspace: Data) -> T? where T : Decodable, T : Encodable {
+    public func get<T>(partition: String, key: String, keyspace: String) -> T? where T : Decodable, T : Encodable {
         do {
             if config.aes256encryptionKey == nil {
                 if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data.value {
@@ -440,7 +440,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     
     
     @discardableResult
-    public func query<T>(partition: Data, keyspace: Data, filter: [String : String]?, map: ((T) -> Bool)) -> [T] where T : Decodable, T : Encodable {
+    public func query<T>(partition: String, keyspace: String, filter: [String : String]?, map: ((T) -> Bool)) -> [T] where T : Decodable, T : Encodable {
         var results: [T] = []
         
         for result: T in all(partition: partition, keyspace: keyspace, filter: filter) {
@@ -453,7 +453,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     }
     
     @discardableResult
-public func all<T>(partition: Data, keyspace: Data, filter: [String : String]?) -> [T] where T : Decodable, T : Encodable {
+public func all<T>(partition: String, keyspace: String, filter: [String : String]?) -> [T] where T : Decodable, T : Encodable {
     
         var f: String = ""
         if let filter = filter, filter.isEmpty == false {
@@ -510,7 +510,7 @@ public func all<T>(partition: Data, keyspace: Data, filter: [String : String]?) 
         }
     }
     
-    public func iterate<T>(partition: Data, keyspace: Data, filter: [String : String]?, iterator: ((T) -> Void)) where T : Decodable, T : Encodable {
+    public func iterate<T>(partition: String, keyspace: String, filter: [String : String]?, iterator: ((T) -> Void)) where T : Decodable, T : Encodable {
         
         var f: String = ""
         if let filter = filter, filter.isEmpty == false {
