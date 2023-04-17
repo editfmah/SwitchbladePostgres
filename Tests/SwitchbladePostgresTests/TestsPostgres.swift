@@ -83,7 +83,7 @@ func initPostgresDatabase(_ config: SwitchbladeConfig? = nil) -> Switchblade {
         
         let config = SwitchbladeConfig()
         
-        db = try! Switchblade(provider: PostgresProvider(connectionString: ""))
+        db = try! Switchblade(provider: PostgresProvider(host: "local", username: "postgres", password: "postgres", database: "unit-tests", connections: 2))
         
         let provider = db.provider as? PostgresProvider
         try? provider?.execute(sql: "DELETE FROM Data;", params: [])
@@ -118,6 +118,42 @@ extension SwitchbladePostgresTests {
                 }
             }
         }
+        
+        XCTFail("failed to write one of the records")
+        
+    }
+    
+    func testPersistObject100k() {
+        
+        let db = initPostgresDatabase()
+        
+        for x in 0...100000 {
+            
+            DispatchQueue.global(qos: .default).async {
+                let partition = "\(UUID().uuidString.lowercased().prefix(8))"
+                
+                let p1 = Person()
+                let p2 = Person()
+                let p3 = Person()
+                
+                p1.Name = "Adrian Herridge"
+                p1.Age = x
+                if db.put(partition: partition, ttl: nil, p1) {
+                    p2.Name = "Neil Bostrom"
+                    p2.Age = x+1
+                    if db.put(partition: partition, ttl: nil, p2) {
+                        p3.Name = "George Smith"
+                        p3.Age = x+2
+                        if db.put(partition: partition, ttl: nil, p3) {
+                            
+                        }
+                    }
+                }
+            }
+            
+        }
+        
+        Thread.sleep(forTimeInterval: 6000)
         
         XCTFail("failed to write one of the records")
         

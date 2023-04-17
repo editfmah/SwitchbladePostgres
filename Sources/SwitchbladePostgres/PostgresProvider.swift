@@ -26,7 +26,13 @@ public class PostgresProvider: DataProvider {
     public var dataTableName = "Data"
     public weak var blade: Switchblade!
     
-    fileprivate var connectionString: String!
+    fileprivate var connectionString: String?
+    fileprivate var host: String?
+    fileprivate var port: Int = 5432
+    fileprivate var username: String?
+    fileprivate var password: String?
+    fileprivate var database: String?
+    fileprivate var connections: Int = 2
     
     fileprivate var db: PostgresConnectionSource!
     
@@ -42,16 +48,31 @@ public class PostgresProvider: DataProvider {
         
     }
     
+    public init(host: String, username: String, password: String, database: String, connections: Int) {
+        self.host = host
+        self.username = username
+        self.password = password
+        self.database = database
+        self.connections = connections
+    }
+    
     public func open() throws {
         
-        var configuration = PostgresConfiguration(url: self.connectionString)
-        configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
-        self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        var configuration: PostgresConfiguration!
+        if let connectionString = connectionString {
+            configuration = PostgresConfiguration(url: connectionString)
+            configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
+        } else if let host = host, let username = username, let password = password, let database = database {
+            configuration = PostgresConfiguration(hostname: host, port: port, username: username, password: password, database: database)
+            configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
+        }
+        
+        self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: connections)
         
         self.db = PostgresConnectionSource(configuration: configuration!)
         self.pool = EventLoopGroupConnectionPool(
             source: db,
-            maxConnectionsPerEventLoop: 2,
+            maxConnectionsPerEventLoop: connections * 16,
             on: self.eventLoopGroup
         )
         
