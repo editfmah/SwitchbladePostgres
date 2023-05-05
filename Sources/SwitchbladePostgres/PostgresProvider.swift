@@ -112,8 +112,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         return key
     }
     
-    public func execute(sql: String, params:[Any?]) throws {
-        
+    fileprivate func makeParams(_ params:[Any?]) -> [PostgresData] {
         var values: [PostgresData] = []
         for p in params {
             if let p = p {
@@ -123,6 +122,12 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                     values.append(PostgresData(string: value))
                 } else if let value = p as? Int {
                     values.append(PostgresData(int: value))
+                } else if let value = p as? Int64 {
+                    values.append(PostgresData(int64: value))
+                } else if let value = p as? UUID {
+                    values.append(PostgresData(uuid: value))
+                } else if let value = p as? Date {
+                    values.append(PostgresData(date: value))
                 } else {
                     values.append(PostgresData.null)
                 }
@@ -130,9 +135,14 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 values.append(PostgresData.null)
             }
         }
+        return values
+    }
+    
+    public func execute(sql: String, params:[Any?]) throws {
+        
+        let values = makeParams(params)
         
         do {
-            
             _ = try pool.withConnection { conn in
                 return conn.query(sql, values)
             }.wait()
@@ -222,22 +232,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     
     fileprivate func iterate<T:Codable>(sql: String, params:[Any?], iterator: ( (T) -> Void)) {
         
-        var values: [PostgresData] = []
-        for p in params {
-            if let p = p {
-                if let value = p as? Data {
-                    values.append(PostgresData(bytes: value))
-                } else if let value = p as? String {
-                    values.append(PostgresData(string: value))
-                } else if let value = p as? Int {
-                    values.append(PostgresData(int: value))
-                } else {
-                    values.append(PostgresData.null)
-                }
-            } else {
-                values.append(PostgresData.null)
-            }
-        }
+        var values = makeParams(params)
         
         do {
             
@@ -276,9 +271,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         
     }
     
-    public func query(sql: String, params:[Any?]) throws -> [(partition: String, keyspace: String, id: String, value: Data?)] {
+    public func query(sql: String, params:[Any?]) throws -> [[PostgresData?]] {
         
-        var results: [(partition: String, keyspace: String, id: String, value: Data?)] = []
+        var results: [[PostgresData?]] = []
         
         var values: [PostgresData] = []
         for p in params {
@@ -289,6 +284,12 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                     values.append(PostgresData(string: value))
                 } else if let value = p as? Int {
                     values.append(PostgresData(int: value))
+                } else if let value = p as? Int64 {
+                    values.append(PostgresData(int64: value))
+                } else if let value = p as? UUID {
+                    values.append(PostgresData(uuid: value))
+                } else if let value = p as? Date {
+                    values.append(PostgresData(date: value))
                 } else {
                     values.append(PostgresData.null)
                 }
@@ -304,11 +305,12 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             }.wait()
             
             for r in rows {
-                let p = r.column("partition")?.string ?? ""
-                let k = r.column("keyspace")?.string ?? ""
-                let id = r.column("id")?.string ?? ""
-                let val = Data(r.column("value")?.bytes ?? [])
-                results.append((partition: p, keyspace: k, id: id, value: val))
+                var resultRow: [PostgresData?] = []
+                let row = r.makeRandomAccess()
+                for c in 0..<r.count {
+                    resultRow.append(row[c].format.postgresData)
+                }
+                results.append(resultRow)
             }
             
         } catch {
@@ -426,12 +428,14 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     public func get<T>(partition: String, key: String, keyspace: String) -> T? where T : Decodable, T : Encodable {
         do {
             if config.aes256encryptionKey == nil {
-                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data.value {
+                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = data[3]?.bytes {
+                    let objectData = Data(objectBytes)
                     let object = try decoder.decode(T.self, from: objectData)
                     return object
                 }
             } else {
-                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectData = data.value, let encKey = config.aes256encryptionKey {
+                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = data[3]?.bytes, let encKey = config.aes256encryptionKey {
+                    let objectData = Data(objectBytes)
                     let key = encKey.sha256()
                     let iv = (encKey + Data(kSaltValue.bytes)).md5()
                     do {
@@ -449,8 +453,8 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             debugPrint("SQLiteProvider Error:  Failed to decode stored object into type: \(T.self)")
             debugPrint("Error:")
             debugPrint(error)
-            if let data = try? query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectData = data.value, let body = String(data: objectData, encoding: .utf8) {
-                
+            if let data = try? query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectBytes = data[3]?.bytes, let body = String(data: Data(objectBytes), encoding: .utf8) {
+                let objectData = Data(objectBytes)
                 debugPrint("Object data:")
                 debugPrint(body)
                 
@@ -487,9 +491,10 @@ public func all<T>(partition: String, keyspace: String, filter: [String : String
         do {
             let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) \(f) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
             var aggregation: [Data] = []
-            for d in data.map({ $0.value }) {
+            for d in data.map({ $0[3]?.bytes }) {
                 if config.aes256encryptionKey == nil {
-                    if let objectData = d {
+                    if let d = d {
+                        let objectData = Data(d)
                         aggregation.append(objectData)
                     }
                 } else {
@@ -499,7 +504,8 @@ public func all<T>(partition: String, keyspace: String, filter: [String : String
                         let iv = (encKey + Data(kSaltValue.bytes)).md5()
                         do {
                             let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                            if let encryptedData = d {
+                            if let d = d {
+                                let encryptedData = Data(d)
                                 let objectData = try aes.decrypt(encryptedData.bytes)
                                 aggregation.append(Data(objectData))
                             }
