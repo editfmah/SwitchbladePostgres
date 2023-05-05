@@ -304,11 +304,12 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 return conn.query(sql, values)
             }.wait()
             
+            let columnNames = rows.map({$0.makeRandomAccess()}).flatMap({ $0.map({ $0.columnName }) })
+            
             for r in rows {
                 var resultRow: [PostgresData?] = []
-                let row = r.makeRandomAccess()
-                for c in 0..<r.count {
-                    resultRow.append(row[c].format.postgresData)
+                for c in columnNames {
+                    resultRow.append(r.column(c))
                 }
                 results.append(resultRow)
             }
@@ -450,7 +451,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 }
             }
         } catch {
-            debugPrint("SQLiteProvider Error:  Failed to decode stored object into type: \(T.self)")
+            debugPrint("PostgresProvider Error:  Failed to decode stored object into type: \(T.self)")
             debugPrint("Error:")
             debugPrint(error)
             if let data = try? query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectBytes = data[3]?.bytes, let body = String(data: Data(objectBytes), encoding: .utf8) {
