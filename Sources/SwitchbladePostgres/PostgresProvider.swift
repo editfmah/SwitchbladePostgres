@@ -33,6 +33,7 @@ public class PostgresProvider: DataProvider {
     fileprivate var password: String?
     fileprivate var database: String?
     fileprivate var connections: Int = 2
+    fileprivate var ssl: Bool = false
     
     fileprivate var db: PostgresConnectionSource!
     
@@ -48,12 +49,15 @@ public class PostgresProvider: DataProvider {
         
     }
     
-    public init(host: String, username: String, password: String, database: String, connections: Int) {
+    public init(host: String, username: String, password: String, database: String, connections: Int, ssl: Bool? = nil) {
         self.host = host
         self.username = username
         self.password = password
         self.database = database
         self.connections = connections
+        if let ssl = ssl {
+            self.ssl = ssl
+        }
     }
     
     public func open() throws {
@@ -64,7 +68,12 @@ public class PostgresProvider: DataProvider {
             configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
         } else if let host = host, let username = username, let password = password, let database = database {
             configuration = PostgresConfiguration(hostname: host, port: port, username: username, password: password, database: database)
-            configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
+            if ssl == false {
+                configuration!.tlsConfiguration = nil
+            } else {
+                configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
+            }
+            
         }
         
         self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: connections)
