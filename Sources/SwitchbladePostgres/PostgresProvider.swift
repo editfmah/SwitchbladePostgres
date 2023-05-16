@@ -65,7 +65,9 @@ public class PostgresProvider: DataProvider {
         var configuration: PostgresConfiguration!
         if let connectionString = connectionString {
             configuration = PostgresConfiguration(url: connectionString)
-            configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
+            if configuration.tlsConfiguration != nil {
+                configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
+            }
         } else if let host = host, let username = username, let password = password, let database = database {
             configuration = PostgresConfiguration(hostname: host, port: port, username: username, password: password, database: database)
             if ssl == false {
