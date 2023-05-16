@@ -17,7 +17,7 @@ let package = Package(
     dependencies: [
         // Dependencies declare other packages that this package depends on.
         .package(url: "https://github.com/editfmah/switchblade.git", .branch("master")),
-        .package(url: "https://github.com/vapor/postgres-kit.git", .exact("2.3.3")),
+        .package(url: "https://github.com/codewinsdotcom/PostgresClientKit", .exact("1.5.0")),
         .package(url: "https://github.com/krzyzanowskim/CryptoSwift.git",   .upToNextMinor(from: "1.3.8")),
     ],
     targets: [
@@ -25,7 +25,7 @@ let package = Package(
         // Targets can depend on other targets in this package, and on products in packages this package depends on.
         .target(
             name: "SwitchbladePostgres",
-            dependencies: [.product(name: "Switchblade", package: "switchblade"), .product(name: "PostgresKit", package: "postgres-kit", condition: .when(platforms: [.linux,.macOS])),"CryptoSwift"]),
+            dependencies: [.product(name: "Switchblade", package: "switchblade"), "PostgresClientKit","CryptoSwift"]),
         .testTarget(
             name: "SwitchbladePostgresTests",
             dependencies: ["SwitchbladePostgres"]),

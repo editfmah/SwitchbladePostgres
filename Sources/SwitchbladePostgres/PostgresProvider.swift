@@ -9,8 +9,44 @@ import Foundation
 
 import Dispatch
 import CryptoSwift
-import PostgresKit
+import PostgresClientKit
 import Switchblade
+
+//import PostgresClientKit
+//
+//do {
+//    var configuration = PostgresClientKit.ConnectionConfiguration()
+//    configuration.host = "127.0.0.1"
+//    configuration.database = "example"
+//    configuration.user = "bob"
+//    configuration.credential = .scramSHA256(password: "welcome1")
+//
+//    let connection = try PostgresClientKit.Connection(configuration: configuration)
+//    defer { connection.close() }
+//
+//    let text = "SELECT city, temp_lo, temp_hi, prcp, date FROM weather WHERE city = $1;"
+//    let statement = try connection.prepareStatement(text: text)
+//    defer { statement.close() }
+//
+//    let cursor = try statement.execute(parameterValues: [ "San Francisco" ])
+//    defer { cursor.close() }
+//
+//    for row in cursor {
+//        let columns = try row.get().columns
+//        let city = try columns[0].string()
+//        let tempLo = try columns[1].int()
+//        let tempHi = try columns[2].int()
+//        let prcp = try columns[3].optionalDouble()
+//        let date = try columns[4].date()
+//
+//        print("""
+//            \(city) on \(date): low: \(tempLo), high: \(tempHi), \
+//            precipitation: \(String(describing: prcp))
+//            """)
+//    }
+//} catch {
+//    print(error) // better error handling goes here
+//}
 
 var ttl_now: Int {
     get {
@@ -26,65 +62,50 @@ public class PostgresProvider: DataProvider {
     public var dataTableName = "Data"
     public weak var blade: Switchblade!
     
-    fileprivate var connectionString: String?
-    fileprivate var host: String?
+    fileprivate var host: String
     fileprivate var port: Int = 5432
-    fileprivate var username: String?
-    fileprivate var password: String?
-    fileprivate var database: String?
+    fileprivate var username: String
+    fileprivate var password: Credential
+    fileprivate var database: String
     fileprivate var connections: Int = 2
     fileprivate var ssl: Bool = false
     
-    fileprivate var db: PostgresConnectionSource!
+    fileprivate var db: Connection!
     
     let decoder: JSONDecoder = JSONDecoder()
     
-    var eventLoop: EventLoop { self.eventLoopGroup.next() }
-    var eventLoopGroup: EventLoopGroup!
-    var pool: EventLoopGroupConnectionPool<PostgresConnectionSource>!
-    
-    public init(connectionString: String)  {
+    public init(host: String, username: String, password: Credential, database: String, connections: Int, ssl: Bool? = nil) {
         
-        self.connectionString = connectionString
-        
-    }
-    
-    public init(host: String, username: String, password: String, database: String, connections: Int, ssl: Bool? = nil) {
         self.host = host
         self.username = username
         self.password = password
         self.database = database
         self.connections = connections
+        
         if let ssl = ssl {
             self.ssl = ssl
         }
+        
     }
     
     public func open() throws {
         
-        var configuration: PostgresConfiguration!
-        if let connectionString = connectionString {
-            configuration = PostgresConfiguration(url: connectionString)
-            configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
-        } else if let host = host, let username = username, let password = password, let database = database {
-            configuration = PostgresConfiguration(hostname: host, port: port, username: username, password: password, database: database)
-            if ssl == false {
-                configuration!.tlsConfiguration = nil
-            } else {
-                configuration!.tlsConfiguration = .forClient(certificateVerification: .none)
-            }
-            
+        var configuration = PostgresClientKit.ConnectionConfiguration()
+        configuration.host = self.host
+        configuration.database = self.database
+        configuration.user = self.username
+        configuration.credential = self.password
+        configuration.ssl = self.ssl
+        
+        do {
+            self.db = try PostgresClientKit.Connection(configuration: configuration)
+        }
+        catch {
+            print("unable to connect to postgres server")
+            print(error)
         }
         
-        self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: connections)
-        
-        self.db = PostgresConnectionSource(configuration: configuration!)
-        self.pool = EventLoopGroupConnectionPool(
-            source: db,
-            maxConnectionsPerEventLoop: connections * 16,
-            on: self.eventLoopGroup
-        )
-        
+
         try execute(sql: """
 CREATE TABLE IF NOT EXISTS \(dataTableName) (
     partition text,
@@ -114,34 +135,34 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     }
     
     public func close() throws {
-        pool.shutdown()
+        db.close()
     }
     
     fileprivate func makeId(_ key: String) -> String {
         return key
     }
     
-    fileprivate func makeParams(_ params:[Any?]) -> [PostgresData] {
-        var values: [PostgresData] = []
+    fileprivate func makeParams(_ params:[Any?]) -> [PostgresValueConvertible?] {
+        var values: [PostgresValueConvertible?] = []
         for p in params {
             if let p = p {
                 if let value = p as? Data {
-                    values.append(PostgresData(bytes: value))
+                    values.append(PostgresByteA(data: value))
                 } else if let value = p as? String {
-                    values.append(PostgresData(string: value))
+                    values.append(value)
                 } else if let value = p as? Int {
-                    values.append(PostgresData(int: value))
+                    values.append(value)
                 } else if let value = p as? Int64 {
-                    values.append(PostgresData(int64: value))
+                    values.append(Int(value))
                 } else if let value = p as? UUID {
-                    values.append(PostgresData(uuid: value))
+                    values.append(value.uuidString.lowercased())
                 } else if let value = p as? Date {
-                    values.append(PostgresData(date: value))
+                    values.append(PostgresTimestamp(date: value, in: .current))
                 } else {
-                    values.append(PostgresData.null)
+                    values.append(nil)
                 }
             } else {
-                values.append(PostgresData.null)
+                values.append(nil)
             }
         }
         return values
@@ -149,16 +170,14 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     
     public func execute(sql: String, params:[Any?]) throws {
         
-        let values = makeParams(params)
-        
         do {
-            _ = try pool.withConnection { conn in
-                return conn.query(sql, values)
-            }.wait()
             
-        } catch {
+            let statement = try db.prepareStatement(text: sql)
+            try statement.execute(parameterValues: makeParams(params))
+            
+        }
+        catch {
             print(error)
-            throw DatabaseError.Execute(.SyntaxError("\(error)"))
         }
         
     }
@@ -166,30 +185,58 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     fileprivate func migrate<T:SchemaVersioned>(iterator: ( (T) -> SchemaVersioned?)) {
         
         let fromInfo = T.version
-
+        
         let sql = "SELECT value, partition, keyspace, id, ttl, filter FROM \(dataTableName) WHERE model = $1 AND version = $2 AND (ttl IS NULL or ttl >= $3)"
         
-        var values: [PostgresData] = [PostgresData(string: fromInfo.objectName), PostgresData(int: fromInfo.version), PostgresData(int: ttl_now)]
+        let values = makeParams([fromInfo.objectName, fromInfo.version, ttl_now])
         
         do {
             
-            let rows = try pool.withConnection { conn in
-                return conn.query(sql, values)
-            }.wait()
+            //    let text = "SELECT city, temp_lo, temp_hi, prcp, date FROM weather WHERE city = $1;"
+            //    let statement = try connection.prepareStatement(text: text)
+            //    defer { statement.close() }
+            //
+            //    let cursor = try statement.execute(parameterValues: [ "San Francisco" ])
+            //    defer { cursor.close() }
+            //
+            //    for row in cursor {
+            //        let columns = try row.get().columns
+            //        let city = try columns[0].string()
+            //        let tempLo = try columns[1].int()
+            //        let tempHi = try columns[2].int()
+            //        let prcp = try columns[3].optionalDouble()
+            //        let date = try columns[4].date()
+            //
+            //        print("""
+            //            \(city) on \(date): low: \(tempLo), high: \(tempHi), \
+            //            precipitation: \(String(describing: prcp))
+            //            """)
+            //    }
             
-            for r in rows {
-                let partition = r.column("partition")?.string ?? ""
-                let keyspace = r.column("keyspace")?.string ?? ""
-                let id = r.column("id")?.string ?? ""
+            let statement = try db.prepareStatement(text: sql)
+            defer { statement.close() }
+            
+            let cursor = try statement.execute(parameterValues: values)
+            defer { cursor.close() }
+
+            // SELECT value, partition, keyspace, id, ttl, filter FROM
+            //          0        1         2       3   4     5
+            
+            for r in cursor {
+                let columns = try r.get().columns
+                let partition = try columns[1].optionalString() ?? ""
+                let keyspace = try columns[2].optionalString() ?? ""
+                let id = try columns[3].optionalString() ?? ""
                 var ttl: Int? = nil
-                if let currentTTl = r.column("ttl")?.int {
+                if let currentTTl = try columns[4].optionalInt() {
                     ttl = currentTTl - ttl_now
                 }
                 var filter: String? = nil
-                if let currentFilter = r.column("filter")?.string {
+                if let currentFilter = try columns[5].optionalString() {
                     filter = currentFilter
                 }
-                if let d = r.column("value")?.bytes {
+                if let bytea = try columns[0].optionalByteA() {
+                    let d = bytea.data
                     if config.aes256encryptionKey == nil {
                         if let object = try? decoder.decode(T.self, from: Data(d)) {
                             if let newObject = iterator(object) {
@@ -211,7 +258,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                             let iv = (encKey + Data(kSaltValue.bytes)).md5()
                             do {
                                 let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                                let objectData = try aes.decrypt(d)
+                                let objectData = try aes.decrypt(bytea.data.bytes)
                                 if let object = try? decoder.decode(T.self, from: Data(bytes: objectData, count: objectData.count)) {
                                     if let newObject = iterator(object) {
                                         if let filterable = newObject as? Filterable {
@@ -241,33 +288,42 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     
     fileprivate func iterate<T:Codable>(sql: String, params:[Any?], iterator: ( (T) -> Void)) {
         
-        var values = makeParams(params)
+        let values = makeParams(params)
         
         do {
             
-            let rows = try pool.withConnection { conn in
-                return conn.query(sql, values)
-            }.wait()
+            let statement = try db.prepareStatement(text: sql)
+            defer { statement.close() }
             
-            for r in rows {
-                if let d = r.column("value")?.bytes {
-                    if config.aes256encryptionKey == nil {
-                        if let object = try? decoder.decode(T.self, from: Data(d)) {
-                            iterator(object)
-                        }
-                    } else {
-                        // this data is to be stored encrypted
-                        if let encKey = config.aes256encryptionKey {
-                            let key = encKey.sha256()
-                            let iv = (encKey + Data(kSaltValue.bytes)).md5()
-                            do {
-                                let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                                let objectData = try aes.decrypt(d)
-                                if let object = try? decoder.decode(T.self, from: Data(bytes: objectData, count: objectData.count)) {
-                                    iterator(object)
+            let cursor = try statement.execute(parameterValues: values, retrieveColumnMetadata: true)
+            defer { cursor.close() }
+
+            // SELECT value, partition, keyspace, id, ttl, filter FROM
+            //          0        1         2       3   4     5
+            
+            for r in cursor {
+                if let columnMetaData = cursor.columns {
+                    let columns = try r.get().columns
+                    let index = columnMetaData.firstIndex(where: { $0.name == "value" }) ?? 0
+                    if let d = try columns[index].optionalByteA()?.data {
+                        if config.aes256encryptionKey == nil {
+                            if let object = try? decoder.decode(T.self, from: Data(d.bytes)) {
+                                iterator(object)
+                            }
+                        } else {
+                            // this data is to be stored encrypted
+                            if let encKey = config.aes256encryptionKey {
+                                let key = encKey.sha256()
+                                let iv = (encKey + Data(kSaltValue.bytes)).md5()
+                                do {
+                                    let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
+                                    let objectData = try aes.decrypt(d.bytes)
+                                    if let object = try? decoder.decode(T.self, from: Data(bytes: objectData, count: objectData.count)) {
+                                        iterator(object)
+                                    }
+                                } catch {
+                                    print("encryption error: \(error)")
                                 }
-                            } catch {
-                                print("encryption error: \(error)")
                             }
                         }
                     }
@@ -280,45 +336,25 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         
     }
     
-    public func query(sql: String, params:[Any?]) throws -> [[PostgresData?]] {
+    public func query(sql: String, params:[Any?]) throws -> [[PostgresValue?]] {
         
-        var results: [[PostgresData?]] = []
+        var results: [[PostgresValue?]] = []
         
-        var values: [PostgresData] = []
-        for p in params {
-            if let p = p {
-                if let value = p as? Data {
-                    values.append(PostgresData(bytes: value))
-                } else if let value = p as? String {
-                    values.append(PostgresData(string: value))
-                } else if let value = p as? Int {
-                    values.append(PostgresData(int: value))
-                } else if let value = p as? Int64 {
-                    values.append(PostgresData(int64: value))
-                } else if let value = p as? UUID {
-                    values.append(PostgresData(uuid: value))
-                } else if let value = p as? Date {
-                    values.append(PostgresData(date: value))
-                } else {
-                    values.append(PostgresData.null)
-                }
-            } else {
-                values.append(PostgresData.null)
-            }
-        }
+        let values = makeParams(params)
         
         do {
             
-            let rows = try pool.withConnection { conn in
-                return conn.query(sql, values)
-            }.wait()
+            let statement = try db.prepareStatement(text: sql)
+            defer { statement.close() }
             
-            let columnNames = rows.map({$0.makeRandomAccess()}).flatMap({ $0.map({ $0.columnName }) })
-            
-            for r in rows {
-                var resultRow: [PostgresData?] = []
-                for c in columnNames {
-                    resultRow.append(r.column(c))
+            let cursor = try statement.execute(parameterValues: values, retrieveColumnMetadata: true)
+            defer { cursor.close() }
+      
+            for r in cursor {
+                var resultRow: [PostgresValue?] = []
+                let columns = try r.get().columns
+                for c in columns {
+                    resultRow.append(c)
                 }
                 results.append(resultRow)
             }
@@ -346,7 +382,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
      do update set name = 'new_name', size = 3;
      */
     
-   
+    
     
     public func put<T>(partition: String, key: String, keyspace: String, ttl: Int, filter: String, _ object: T) -> Bool where T : Decodable, T : Encodable {
         
@@ -438,13 +474,13 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     public func get<T>(partition: String, key: String, keyspace: String) -> T? where T : Decodable, T : Encodable {
         do {
             if config.aes256encryptionKey == nil {
-                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = data[3]?.bytes {
+                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = try? data[3]?.byteA().data {
                     let objectData = Data(objectBytes)
                     let object = try decoder.decode(T.self, from: objectData)
                     return object
                 }
             } else {
-                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = data[3]?.bytes, let encKey = config.aes256encryptionKey {
+                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = try? data[3]?.byteA().data, let encKey = config.aes256encryptionKey {
                     let objectData = Data(objectBytes)
                     let key = encKey.sha256()
                     let iv = (encKey + Data(kSaltValue.bytes)).md5()
@@ -463,9 +499,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             debugPrint("PostgresProvider Error:  Failed to decode stored object into type: \(T.self)")
             debugPrint("Error:")
             debugPrint(error)
-            if let data = try? query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectBytes = data[3]?.bytes, let body = String(data: Data(objectBytes), encoding: .utf8) {
+            if let data = try? query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectBytes = try? data[3]?.byteA().data, let body = String(data: Data(objectBytes), encoding: .utf8) {
                 let objectData = Data(objectBytes)
-                debugPrint("Object data:")
+                debugPrint("Object data: \(String(data: objectData, encoding: .utf8) ?? "")")
                 debugPrint(body)
                 
             }
@@ -488,8 +524,8 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     }
     
     @discardableResult
-public func all<T>(partition: String, keyspace: String, filter: [String : String]?) -> [T] where T : Decodable, T : Encodable {
-    
+    public func all<T>(partition: String, keyspace: String, filter: [String : String]?) -> [T] where T : Decodable, T : Encodable {
+        
         var f: String = ""
         if let filter = filter, filter.isEmpty == false {
             for kvp in filter {
@@ -497,11 +533,11 @@ public func all<T>(partition: String, keyspace: String, filter: [String : String
                 f += " AND filter LIKE '%\(value)%' "
             }
         }
-    
+        
         do {
             let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) \(f) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
             var aggregation: [Data] = []
-            for d in data.map({ $0[3]?.bytes }) {
+            for d in data.map({ try? $0[3]?.byteA().data }) {
                 if config.aes256encryptionKey == nil {
                     if let d = d {
                         let objectData = Data(d)
