@@ -315,7 +315,10 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 return conn.query(sql, values)
             }.wait()
             
-            let columnNames = rows.map({$0.makeRandomAccess()}).flatMap({ $0.map({ $0.columnName }) })
+            var columnNames: [String] = []
+            if let firstRow = rows.first {
+                columnNames = firstRow.makeRandomAccess().compactMap({ $0.columnName })
+            }
             
             for r in rows {
                 var resultRow: [PostgresData?] = []
