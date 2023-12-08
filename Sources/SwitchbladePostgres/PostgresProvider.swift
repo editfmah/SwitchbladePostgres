@@ -337,6 +337,24 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         
     }
     
+    public func ids(partition: String, keyspace: String, filter: [String : String]?) -> [String] {
+            
+            var f: String = ""
+            if let filter = filter, filter.isEmpty == false {
+                for kvp in filter {
+                    let value = "\(kvp.key)=\(kvp.value)".md5()
+                    f += " AND filter LIKE '%\(value)%' "
+                }
+            }
+            
+            do {
+                let data = try query(sql: "SELECT id FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) \(f) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
+                return data.map({ $0[0]?.string ?? "" })
+            } catch {
+                return []
+            }
+    }
+    
     public func transact(_ mode: transaction) -> Bool {
         return true
     }
@@ -344,14 +362,6 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     public func migrate<FromType: SchemaVersioned, ToType: SchemaVersioned>(from: FromType.Type, to: ToType.Type, migration: @escaping ((FromType) -> ToType?)) {
         self.migrate(iterator: migration)
     }
-    
-    /*
-     *      insert into dummy(id, name, size) values(1, 'new_name', 3)
-     on conflict(id)
-     do update set name = 'new_name', size = 3;
-     */
-    
-   
     
     public func put<T>(partition: String, key: String, keyspace: String, ttl: Int, filter: String, _ object: T) -> Bool where T : Decodable, T : Encodable {
         
