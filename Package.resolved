@@ -167,8 +167,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/editfmah/switchblade.git",
       "state" : {
-        "revision" : "ecfc1d7c64219e371463f530d4ca0e303db2525f",
-        "version" : "0.0.10"
+        "revision" : "fb9e98fb3d449d9e96254c35472d881cbbf37aed",
+        "version" : "0.1.0"
       }
     }
   ],

@@ -1,6 +1,6 @@
 //
 //  PostgresProvider.swift
-//  
+//
 //
 //  Created by Adrian Herridge on 15/10/2021.
 //
@@ -8,7 +8,6 @@
 import Foundation
 
 import Dispatch
-import CryptoSwift
 import PostgresKit
 import Switchblade
 
@@ -92,12 +91,12 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     partition text,
     keyspace text,
     id text,
-    value bytea,
+    value json,
     ttl int,
     timestamp int,
     model text,
     version int,
-    filter text,
+    filter json,
     PRIMARY KEY (partition,keyspace,id)
 );
 """, params: [])
@@ -139,6 +138,12 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                     values.append(PostgresData(uuid: value))
                 } else if let value = p as? Date {
                     values.append(PostgresData(date: value))
+                } else if let value = p as? Encodable {
+                    if let data = try? JSONEncoder().encode(value) {
+                        values.append(PostgresData(json: data))
+                    } else {
+                        values.append(PostgresData.null)
+                    }
                 } else {
                     values.append(PostgresData.null)
                 }
@@ -168,8 +173,8 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     fileprivate func migrate<T:SchemaVersioned>(iterator: ( (T) -> SchemaVersioned?)) {
         
         let fromInfo = T.version
-
-        let sql = "SELECT value, partition, keyspace, id, ttl, filter FROM \(dataTableName) WHERE model = $1 AND version = $2 AND (ttl IS NULL or ttl >= $3)"
+        
+        let sql = "SELECT value, partition, keyspace, id, ttl FROM \(dataTableName) WHERE model = $1 AND version = $2 AND (ttl IS NULL or ttl >= $3)"
         
         var values: [PostgresData] = [PostgresData(string: fromInfo.objectName), PostgresData(int: fromInfo.version), PostgresData(int: ttl_now)]
         
@@ -187,49 +192,18 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 if let currentTTl = r.column("ttl")?.int {
                     ttl = currentTTl - ttl_now
                 }
-                var filter: String? = nil
-                if let currentFilter = r.column("filter")?.string {
-                    filter = currentFilter
-                }
-                if let d = r.column("value")?.bytes {
-                    if config.aes256encryptionKey == nil {
-                        if let object = try? decoder.decode(T.self, from: Data(d)) {
-                            if let newObject = iterator(object) {
-                                if let filterable = newObject as? Filterable {
-                                    var newFilter = ""
-                                    for kvp in filterable.filters {
-                                        let value = "\(kvp.key)=\(kvp.value)".md5()
-                                        newFilter += " AND filter LIKE '%\(value)%' "
-                                    }
-                                    filter = newFilter
-                                }
-                                let _ = self.put(partition: partition, key: id, keyspace: keyspace, ttl: ttl ?? -1, filter: filter ?? "", newObject)
-                            }
-                        }
-                    } else {
-                        // this data is to be stored encrypted
-                        if let encKey = config.aes256encryptionKey {
-                            let key = encKey.sha256()
-                            let iv = (encKey + Data(kSaltValue.bytes)).md5()
-                            do {
-                                let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                                let objectData = try aes.decrypt(d)
-                                if let object = try? decoder.decode(T.self, from: Data(bytes: objectData, count: objectData.count)) {
-                                    if let newObject = iterator(object) {
-                                        if let filterable = newObject as? Filterable {
-                                            var newFilter = ""
-                                            for kvp in filterable.filters {
-                                                let value = "\(kvp.key)=\(kvp.value)".md5()
-                                                newFilter += " AND filter LIKE '%\(value)%' "
-                                            }
-                                            filter = newFilter
-                                        }
-                                        let _ = self.put(partition: partition, key: id, keyspace: keyspace, ttl: ttl ?? -1, filter: filter ?? "", newObject)
-                                    }
-                                }
-                            } catch {
-                                print("encryption error: \(error)")
-                            }
+                
+                if let d = r.column("value")?.json {
+                    if let object = try? decoder.decode(T.self, from: Data(d)) {
+                        if let newObject = iterator(object) {
+                            let _ = self.put(
+                                partition: partition,
+                                key: id,
+                                keyspace: keyspace,
+                                ttl: ttl ?? -1,
+                                filter: (newObject as? Filterable)?.filters.dictionary ?? [:],
+                                newObject
+                            )
                         }
                     }
                 }
@@ -252,26 +226,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             }.wait()
             
             for r in rows {
-                if let d = r.column("value")?.bytes {
-                    if config.aes256encryptionKey == nil {
-                        if let object = try? decoder.decode(T.self, from: Data(d)) {
-                            iterator(object)
-                        }
-                    } else {
-                        // this data is to be stored encrypted
-                        if let encKey = config.aes256encryptionKey {
-                            let key = encKey.sha256()
-                            let iv = (encKey + Data(kSaltValue.bytes)).md5()
-                            do {
-                                let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                                let objectData = try aes.decrypt(d)
-                                if let object = try? decoder.decode(T.self, from: Data(bytes: objectData, count: objectData.count)) {
-                                    iterator(object)
-                                }
-                            } catch {
-                                print("encryption error: \(error)")
-                            }
-                        }
+                if let d = r.column("value")?.json {
+                    if let object = try? decoder.decode(T.self, from: Data(d)) {
+                        iterator(object)
                     }
                 }
             }
@@ -301,6 +258,12 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                     values.append(PostgresData(uuid: value))
                 } else if let value = p as? Date {
                     values.append(PostgresData(date: value))
+                } else if let value = p as? Encodable {
+                    if let data = try? JSONEncoder().encode(value) {
+                        values.append(PostgresData(json: data))
+                    } else {
+                        values.append(PostgresData.null)
+                    }
                 } else {
                     values.append(PostgresData.null)
                 }
@@ -338,21 +301,20 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     }
     
     public func ids(partition: String, keyspace: String, filter: [String : String]?) -> [String] {
-            
-            var f: String = ""
-            if let filter = filter, filter.isEmpty == false {
-                for kvp in filter {
-                    let value = "\(kvp.key)=\(kvp.value)".md5()
-                    f += " AND filter LIKE '%\(value)%' "
-                }
+        
+        var f: String = ""
+        if let filter = filter, filter.isEmpty == false {
+            for kvp in filter {
+                f += " AND filter->>'\(kvp.key)' = '\(kvp.value)' "
             }
-            
-            do {
-                let data = try query(sql: "SELECT id FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) \(f) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
-                return data.map({ $0[0]?.string ?? "" })
-            } catch {
-                return []
-            }
+        }
+        
+        do {
+            let data = try query(sql: "SELECT id FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) \(f) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
+            return data.map({ $0[0]?.string ?? "" })
+        } catch {
+            return []
+        }
     }
     
     public func transact(_ mode: transaction) -> Bool {
@@ -363,78 +325,40 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         self.migrate(iterator: migration)
     }
     
-    public func put<T>(partition: String, key: String, keyspace: String, ttl: Int, filter: String, _ object: T) -> Bool where T : Decodable, T : Encodable {
+    public func put<T>(partition: String, key: String, keyspace: String, ttl: Int, filter: [String : String]?, _ object: T) -> Bool where T : Decodable, T : Encodable {
         
-        if let jsonObject = try? JSONEncoder().encode(object) {
-            let id = makeId(key)
-            do {
-                if config.aes256encryptionKey == nil {
-                    
-                    var model: String? = nil
-                    var version: Int? = nil
-                    if let info = (T.self as? SchemaVersioned.Type)?.version {
-                        model = info.objectName
-                        version = info.version
-                    }
-                    
-                    try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp,model,version,filter) VALUES ($1,$2,$3,$4,$5,$6,$10,$11,$14) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9, model = $12, version = $13, filter = $15;",
-                                params: [
-                                    partition,
-                                    keyspace,
-                                    id,
-                                    jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
-                                    Int(Date().timeIntervalSince1970),
-                                    jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
-                                    Int(Date().timeIntervalSince1970),
-                                    model,
-                                    version,
-                                    model,
-                                    version,
-                                    filter,
-                                    filter,
-                                ])
-                } else {
-                    // this data is to be stored encrypted
-                    if let encKey = config.aes256encryptionKey {
-                        let key = encKey.sha256()
-                        let iv = (encKey + Data(kSaltValue.bytes)).md5()
-                        do {
-                            let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                            let encryptedData = Data(try aes.encrypt(jsonObject.bytes))
-                            
-                            var model: String? = nil
-                            var version: Int? = nil
-                            if let info = (T.self as? SchemaVersioned.Type)?.version {
-                                model = info.objectName
-                                version = info.version
-                            }
-                            
-                            try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp,model,version, filter) VALUES ($1,$2,$3,$4,$5,$6,$10,$11,$14) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9, model = $12, version = $13, filter = $15;",
-                                        params: [
-                                            partition,
-                                            keyspace,
-                                            id,
-                                            encryptedData,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
-                                            Int(Date().timeIntervalSince1970),
-                                            encryptedData,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
-                                            Int(Date().timeIntervalSince1970),
-                                            model,
-                                            version,
-                                            model,
-                                            version,
-                                            filter,
-                                            filter,
-                                        ])
-                        } catch {
-                            print("encryption error: \(error)")
-                        }
-                    }
-                }
-                
-                return true
-            } catch {
-                return false
+        let jsonObject = object
+        
+        let id = makeId(key)
+        do {
+            
+            var model: String? = nil
+            var version: Int? = nil
+            if let info = (T.self as? SchemaVersioned.Type)?.version {
+                model = info.objectName
+                version = info.version
             }
+            
+            try execute(sql: "INSERT INTO \(dataTableName) (partition,keyspace,id,value,ttl,timestamp,model,version,filter) VALUES ($1,$2,$3,$4,$5,$6,$10,$11,$14) ON CONFLICT(partition,keyspace,id) DO UPDATE SET value = $7, ttl = $8, timestamp = $9, model = $12, version = $13, filter = $15;",
+                        params: [
+                            partition,
+                            keyspace,
+                            id,
+                            jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
+                            Int(Date().timeIntervalSince1970),
+                            jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
+                            Int(Date().timeIntervalSince1970),
+                            model,
+                            version,
+                            model,
+                            version,
+                            filter,
+                            filter,
+                        ])
+            
+            return true
+        } catch {
+            return false
         }
         return false
     }
@@ -452,33 +376,16 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     @discardableResult
     public func get<T>(partition: String, key: String, keyspace: String) -> T? where T : Decodable, T : Encodable {
         do {
-            if config.aes256encryptionKey == nil {
-                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = data[3]?.bytes {
-                    let objectData = Data(objectBytes)
-                    let object = try decoder.decode(T.self, from: objectData)
-                    return object
-                }
-            } else {
-                if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = data[3]?.bytes, let encKey = config.aes256encryptionKey {
-                    let objectData = Data(objectBytes)
-                    let key = encKey.sha256()
-                    let iv = (encKey + Data(kSaltValue.bytes)).md5()
-                    do {
-                        let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                        let decryptedBytes = try aes.decrypt(objectData.bytes)
-                        let decryptedData = Data(decryptedBytes)
-                        let object = try decoder.decode(T.self, from: decryptedData)
-                        return object
-                    } catch {
-                        print("encryption error: \(error)")
-                    }
-                }
+            if let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first, let objectBytes = data[3]?.json {
+                let objectData = Data(objectBytes)
+                let object = try decoder.decode(T.self, from: objectData)
+                return object
             }
         } catch {
             debugPrint("PostgresProvider Error:  Failed to decode stored object into type: \(T.self)")
             debugPrint("Error:")
             debugPrint(error)
-            if let data = try? query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectBytes = data[3]?.bytes, let body = String(data: Data(objectBytes), encoding: .utf8) {
+            if let data = try? query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key, ttl_now]).first, let objectBytes = data[3]?.json, let body = String(data: Data(objectBytes), encoding: .utf8) {
                 let objectData = Data(objectBytes)
                 debugPrint("Object data:")
                 debugPrint(body)
@@ -503,60 +410,22 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     }
     
     @discardableResult
-public func all<T>(partition: String, keyspace: String, filter: [String : String]?) -> [T] where T : Decodable, T : Encodable {
-    
+    public func all<T>(partition: String, keyspace: String, filter: [String : String]?) -> [T] where T : Decodable, T : Encodable {
+        
         var f: String = ""
         if let filter = filter, filter.isEmpty == false {
             for kvp in filter {
-                let value = "\(kvp.key)=\(kvp.value)".md5()
-                f += " AND filter LIKE '%\(value)%' "
+                f += " AND filter->>'\(kvp.key)' = '\(kvp.value)' "
             }
         }
-    
+        
         do {
+            var results: [T] = []
             let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) \(f) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
-            var aggregation: [Data] = []
-            for d in data.map({ $0[3]?.bytes }) {
-                if config.aes256encryptionKey == nil {
-                    if let d = d {
-                        let objectData = Data(d)
-                        aggregation.append(objectData)
-                    }
-                } else {
-                    // this data is to be stored encrypted
-                    if let encKey = config.aes256encryptionKey {
-                        let key = encKey.sha256()
-                        let iv = (encKey + Data(kSaltValue.bytes)).md5()
-                        do {
-                            let aes = try AES(key: key.bytes, blockMode: CBC(iv: iv.bytes))
-                            if let d = d {
-                                let encryptedData = Data(d)
-                                let objectData = try aes.decrypt(encryptedData.bytes)
-                                aggregation.append(Data(objectData))
-                            }
-                        } catch {
-                            print("encryption error: \(error)")
-                        }
-                    }
-                }
+            for d in data.compactMap({ try? $0[3]?.json(as: T.self) }) {
+                results.append(d)
             }
-            let opener = "[".data(using: .utf8)!
-            let closer = "]".data(using: .utf8)!
-            let separater = ",".data(using: .utf8)!
-            var fullData = opener
-            fullData.append(contentsOf: aggregation.joined(separator: separater))
-            fullData.append(closer)
-            if let results = try? JSONDecoder().decode([T].self, from: fullData) {
-                return results
-            } else {
-                var results: [T] = []
-                for v in aggregation {
-                    if let object = try? JSONDecoder().decode(T.self, from: v) {
-                        results.append(object)
-                    }
-                }
-                return results
-            }
+            return results
         } catch  {
             return []
         }
@@ -567,8 +436,7 @@ public func all<T>(partition: String, keyspace: String, filter: [String : String
         var f: String = ""
         if let filter = filter, filter.isEmpty == false {
             for kvp in filter {
-                let value = "\(kvp.key)=\(kvp.value)".md5()
-                f += " AND filter LIKE '%\(value)%' "
+                f += " AND filter->>'\(kvp.key)' = '\(kvp.value)' "
             }
         }
         

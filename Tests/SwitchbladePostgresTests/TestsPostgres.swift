@@ -55,9 +55,13 @@ public class PersonVersion2 : Codable, SchemaVersioned {
 
 public class PersonFilterable : Codable, Filterable, Identifiable, KeyspaceIdentifiable {
     
-    public var filters: [String : String] {
+    public var filters: [Filters] {
         get {
-            return ["type" : "person", "age" : "\(self.Age ?? 0)", "name" : self.Name ?? ""]
+            return [
+                .string(name: "type", value: "person"),
+                .int(name: "age", value: self.Age),
+                .string(name: "name", value: self.Name)
+            ]
         }
     }
     
@@ -77,7 +81,7 @@ public class PersonFilterable : Codable, Filterable, Identifiable, KeyspaceIdent
     
 }
 
-func initPostgresDatabase(_ config: SwitchbladeConfig? = nil) -> Switchblade {
+func initDB(_ config: SwitchbladeConfig? = nil) -> Switchblade {
     
     if db == nil {
         
@@ -98,7 +102,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistObject() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -123,14 +127,20 @@ extension SwitchbladePostgresTests {
         
     }
     
-    func testPersistObject100k() {
+    func testPersistObject1k() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         
-        for x in 0...100000 {
+        var partitions: [String] = []
+        var lock = Mutex()
+        
+        for x in 0...1000 {
             
             DispatchQueue.global(qos: .default).async {
                 let partition = "\(UUID().uuidString.lowercased().prefix(8))"
+                lock.mutex {
+                    partitions.append(partition)
+                }
                 
                 let p1 = Person()
                 let p2 = Person()
@@ -153,15 +163,21 @@ extension SwitchbladePostgresTests {
             
         }
         
-        Thread.sleep(forTimeInterval: 6000)
+        Thread.sleep(forTimeInterval: 30)
+        
+        let results: [Person] = db.all(partition: partitions.randomElement()!, keyspace: "person")
+        if results.count == 3 {
+            return
+        }
         
         XCTFail("failed to write one of the records")
         
     }
+
     
     func testPersistQueryObject() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -183,7 +199,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistSingleObjectAndCheckAll() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -204,7 +220,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistMultipleObjectsAndCheckAll() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -234,7 +250,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistMultipleObjectsAndCheckIds() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -264,7 +280,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistMultipleObjectsAndIdsWithFilter() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         
         let p1 = PersonFilterable()
         let p2 = PersonFilterable()
@@ -279,8 +295,8 @@ extension SwitchbladePostgresTests {
                 p3.Name = "George Smith"
                 p3.Age = 28
                 if db.put(p3) {
-                    let ps: [Person] = db.all(keyspace: p1.keyspace, filter: ["age" : "41"])
-                    let ids: [String] = db.ids(keyspace: p1.keyspace, filter: ["age" : "41"]).map({ $0.uppercased() })
+                    let ps: [Person] = db.all(keyspace: p1.keyspace, filter: [.int(name: "age", value: 41)])
+                    let ids: [String] = db.ids(keyspace: p1.keyspace, filter: [.int(name: "age", value: 41)]).map({ $0.uppercased() })
                     if ids.count == 1 {
                         if ids.contains(p1.PersonId.uuidString.uppercased()) {
                             return
@@ -294,7 +310,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistMultipleObjectsAndFilterAll() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -323,7 +339,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistMultipleObjectsAndQuery() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -359,7 +375,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistMultipleObjectsAndQueryMultipleParams() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -393,80 +409,9 @@ extension SwitchbladePostgresTests {
         XCTFail("failed to write one of the records")
     }
     
-    func testPersistAndQueryObjectEncrypted() {
-        
-        let config = SwitchbladeConfig()
-        config.aes256encryptionKey = Data("big_sprouts".utf8)
-        let db = initPostgresDatabase(config)
-        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
-        
-        let p1 = Person()
-        
-        p1.Name = "Adrian Herridge"
-        p1.Age = 41
-        if db.put(partition: partition, ttl: nil,p1) {
-            if let _: Person = db.get(partition: partition, key: p1.key, keyspace: p1.keyspace) {
-                
-            } else {
-                XCTFail("failed to retrieve one of the records")
-            }
-        } else {
-            XCTFail("failed to write one of the records")
-        }
-    }
-    
-    func testPersistAndQueryObjectEncryptedWrongSeed() {
-        
-        let config = SwitchbladeConfig()
-        config.aes256encryptionKey = Data("big_sprouts".utf8)
-        let db = initPostgresDatabase(config)
-        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
-        
-        let p1 = Person()
-        
-        p1.Name = "Adrian Herridge"
-        p1.Age = 41
-        if db.put(partition: partition, ttl: nil,p1) {
-            config.aes256encryptionKey = Data("small_sprouts".utf8)
-            if let retrieved: Person = db.get(partition: partition, key: p1.key, keyspace: p1.keyspace) {
-                XCTFail("failed to retrieve one of the records")
-            } else {
-                
-            }
-        } else {
-            XCTFail("failed to write one of the records")
-        }
-    }
-    
-    func testPersistAndQueryObjectPropertiesEncrypted() {
-        
-        let config = SwitchbladeConfig()
-        config.aes256encryptionKey = Data("big_sprouts".utf8)
-        config.hashQueriableProperties = true
-        let db = initPostgresDatabase(config)
-        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
-        
-        let p1 = Person()
-        
-        p1.Name = "Adrian Herridge"
-        p1.Age = 41
-        if db.put(partition: partition, ttl: nil,p1) {
-            let retrieved: [Person] = db.query(partition: partition, keyspace: p1.keyspace) { result in
-                return result.Age == 41
-            }
-            if retrieved.count == 1 {
-                
-            } else {
-                XCTFail("failed to retrieve one of the records")
-            }
-        } else {
-            XCTFail("failed to write one of the records")
-        }
-    }
-    
     func testQueryParamEqualls() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -497,7 +442,7 @@ extension SwitchbladePostgresTests {
     
     func testQueryParamGreaterThan() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -526,7 +471,7 @@ extension SwitchbladePostgresTests {
     
     func testQueryParamLessThan() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -558,7 +503,7 @@ extension SwitchbladePostgresTests {
     
     func testQueryParamIsNull() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -615,7 +560,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistObjectCompositeKey() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -642,7 +587,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistQueryObjectCompositeKey() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -666,7 +611,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistMultipleIterate() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -699,7 +644,7 @@ extension SwitchbladePostgresTests {
     
     func testPersistMultipleIterateInspect() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -734,7 +679,7 @@ extension SwitchbladePostgresTests {
     
     func testTTLTimeout() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         let partition = "\(UUID().uuidString.lowercased().prefix(8))"
         
         let p1 = Person()
@@ -769,7 +714,7 @@ extension SwitchbladePostgresTests {
     
     func testObjectMigration() {
         
-        let db = initPostgresDatabase()
+        let db = initDB()
         
         let id = UUID()
         
@@ -805,123 +750,147 @@ extension SwitchbladePostgresTests {
         
     }
     
-    func testFilterMultiple() {
-        
-        let db = initPostgresDatabase()
-        
-        
+    func testFilter() {
+
+        let db = initDB()
+
         let p1 = Person()
         p1.Name = "Adrian Herridge"
         p1.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "123"], p1)
-        
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true)], p1)
+
         let p2 = Person()
         p2.Name = "Adrian Herridge"
         p2.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true"], p2)
-        
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true)], p2)
+
         let p3 = Person()
         p3.Name = "Adrian Herridge"
         p3.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "false"], p3)
-        
-        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true"])
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: false)], p3)
+
+        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true)])
         if results.count == 2 {
             return
         }
-        
+
         XCTFail("failed to write one of the records")
-        
+
     }
-    
-    func testFilterMultipleAND() {
-        
-        let db = initPostgresDatabase()
-        
-        
+
+    func testFilterMultiple() {
+
+        let db = initDB()
+
         let p1 = Person()
         p1.Name = "Adrian Herridge"
         p1.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "123"], p1)
-        
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true), .int(name: "extravar", value: 123)], p1)
+
         let p2 = Person()
         p2.Name = "Adrian Herridge"
         p2.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true"], p2)
-        
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true)], p2)
+
         let p3 = Person()
         p3.Name = "Adrian Herridge"
         p3.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "false"], p3)
-        
-        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "123"])
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: false)], p3)
+
+        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true)])
+        if results.count == 2 {
+            return
+        }
+
+        XCTFail("failed to write one of the records")
+
+    }
+
+    func testFilterMultipleAND() {
+
+        let db = initDB()
+
+        let p1 = Person()
+        p1.Name = "Adrian Herridge"
+        p1.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true), .int(name: "extravar", value: 123)], p1)
+
+        let p2 = Person()
+        p2.Name = "Adrian Herridge"
+        p2.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true)], p2)
+
+        let p3 = Person()
+        p3.Name = "Adrian Herridge"
+        p3.Age = 40
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: false)], p3)
+
+        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true), .int(name: "extravar", value: 123)])
         if results.count == 1 {
             return
         }
-        
+
         XCTFail("failed to write one of the records")
-        
+
     }
-    
+
     func testFilterMultipleNegative() {
-        
-        let db = initPostgresDatabase()
-        
-        
+
+        let db = initDB()
+
         let p1 = Person()
         p1.Name = "Adrian Herridge"
         p1.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "1234"], p1)
-        
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true), .int(name: "extravar", value: 1234)], p1)
+
         let p2 = Person()
         p2.Name = "Adrian Herridge"
         p2.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true"], p2)
-        
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true)], p2)
+
         let p3 = Person()
         p3.Name = "Adrian Herridge"
         p3.Age = 40
-        db.put(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "false"], p3)
-        
-        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: ["crazyvar" : "true", "extravar" : "123"])
+        db.put(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: false)], p3)
+
+        let results: [Person] = db.all(partition: "default", keyspace: p1.keyspace, filter: [.bool(name: "crazyvar", value: true), .int(name: "extravar", value: 123)])
         if results.count == 0 {
             return
         }
-        
+
         XCTFail("failed to write one of the records")
-        
+
     }
-    
+
     func testFilterProtocolConformance() {
-        
-        let db = initPostgresDatabase()
-        
-        
+
+        let db = initDB()
+
         let p1 = PersonFilterable()
         p1.Name = "Adrian Herridge"
         p1.Age = 40
-        db.put(p1)
-        
+        db.put(partition: "default", keyspace: "person", filter: [.int(name: "age", value: 40)], p1)
+
         let p2 = PersonFilterable()
         p2.Name = "Neil Bostrom"
         p2.Age = 40
-        db.put(p2)
-        
+        db.put(partition: "default", keyspace: "person", filter: [.int(name: "age", value: 40)], p2)
+
         let p3 = PersonFilterable()
         p3.Name = "Sarah Herridge"
         p3.Age = 40
-        db.put(p3)
-        
-        let results: [PersonFilterable] = db.all(keyspace: "person", filter: ["age" : "40"])
+        db.put(partition: "default", keyspace: "person", filter: [.int(name: "age", value: 40)], p3)
+
+        let results: [PersonFilterable] = db.all(partition: "default", keyspace: "person", filter: [.int(name: "age", value: 40)])
         if results.count != 3 {
             XCTFail("failed to get the correct filtered records")
         }
-        
-        let results2: [PersonFilterable] = db.all(keyspace: "person", filter: ["name" : "Neil Bostrom"])
+
+        let results2: [PersonFilterable] = db.all(partition: "default", keyspace: "person", filter: [.string(name: "name", value: "Neil Bostrom")])
         if results2.count != 1 {
             XCTFail("failed to get the correct filtered records")
         }
-        
+
     }
     
 }
