@@ -37,6 +37,7 @@ public class PostgresProvider: DataProvider {
     fileprivate var db: PostgresConnectionSource!
     
     let decoder: JSONDecoder = JSONDecoder()
+    let encoder: JSONEncoder = JSONEncoder()
     
     var eventLoop: EventLoop { self.eventLoopGroup.next() }
     var eventLoopGroup: EventLoopGroup!
@@ -60,6 +61,9 @@ public class PostgresProvider: DataProvider {
     }
     
     public func open() throws {
+        
+        encoder.dataEncodingStrategy = .base64
+        encoder.dateEncodingStrategy = .iso8601
         
         var configuration: PostgresConfiguration!
         if let connectionString = connectionString {
@@ -122,34 +126,41 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         return key
     }
     
+    fileprivate func encodeValue(_ value: Any?) -> PostgresData {
+        
+        if value == nil {
+            return PostgresData.null
+        }
+        
+        if let value = value as? PostgresData {
+            // already a postgres data object
+            return value
+        }
+        
+        // now go through the encodable types
+        if let value = value as? Data {
+            return PostgresData(bytes: value)
+        } else if let value = value as? String {
+            return PostgresData(string: value)
+        } else if let value = value as? Int {
+            return PostgresData(int: value)
+        } else if let value = value as? Int64 {
+            return PostgresData(int64: value)
+        } else if let value = value as? UUID {
+            return PostgresData(uuid: value)
+        } else if let value = value as? Date {
+            return PostgresData(date: value)
+        } else if let value = value as? Encodable {
+            return (try? PostgresData(json: value)) ?? PostgresData.null
+        }
+        
+        return PostgresData.null
+    }
+    
     fileprivate func makeParams(_ params:[Any?]) -> [PostgresData] {
         var values: [PostgresData] = []
         for p in params {
-            if let p = p {
-                if let value = p as? Data {
-                    values.append(PostgresData(bytes: value))
-                } else if let value = p as? String {
-                    values.append(PostgresData(string: value))
-                } else if let value = p as? Int {
-                    values.append(PostgresData(int: value))
-                } else if let value = p as? Int64 {
-                    values.append(PostgresData(int64: value))
-                } else if let value = p as? UUID {
-                    values.append(PostgresData(uuid: value))
-                } else if let value = p as? Date {
-                    values.append(PostgresData(date: value))
-                } else if let value = p as? Encodable {
-                    if let data = try? JSONEncoder().encode(value) {
-                        values.append(PostgresData(json: data))
-                    } else {
-                        values.append(PostgresData.null)
-                    }
-                } else {
-                    values.append(PostgresData.null)
-                }
-            } else {
-                values.append(PostgresData.null)
-            }
+            values.append(encodeValue(p))
         }
         return values
     }
@@ -245,31 +256,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         
         var values: [PostgresData] = []
         for p in params {
-            if let p = p {
-                if let value = p as? Data {
-                    values.append(PostgresData(bytes: value))
-                } else if let value = p as? String {
-                    values.append(PostgresData(string: value))
-                } else if let value = p as? Int {
-                    values.append(PostgresData(int: value))
-                } else if let value = p as? Int64 {
-                    values.append(PostgresData(int64: value))
-                } else if let value = p as? UUID {
-                    values.append(PostgresData(uuid: value))
-                } else if let value = p as? Date {
-                    values.append(PostgresData(date: value))
-                } else if let value = p as? Encodable {
-                    if let data = try? JSONEncoder().encode(value) {
-                        values.append(PostgresData(json: data))
-                    } else {
-                        values.append(PostgresData.null)
-                    }
-                } else {
-                    values.append(PostgresData.null)
-                }
-            } else {
-                values.append(PostgresData.null)
-            }
+            values.append(encodeValue(p))
         }
         
         do {
@@ -327,7 +314,6 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     
     public func put<T>(partition: String, key: String, keyspace: String, ttl: Int, filter: [String : String]?, _ object: T) -> Bool where T : Decodable, T : Encodable {
         
-        let jsonObject = object
         
         let id = makeId(key)
         do {
@@ -344,9 +330,11 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                             partition,
                             keyspace,
                             id,
-                            jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
+                            PostgresData(json: object),
+                            ttl == -1 ? nil : (Int(Date().timeIntervalSince1970) + ttl),
                             Int(Date().timeIntervalSince1970),
-                            jsonObject,ttl == -1 ? nil : Int(Date().timeIntervalSince1970) + ttl,
+                            PostgresData(json: object),
+                            ttl == -1 ? nil : (Int(Date().timeIntervalSince1970) + ttl),
                             Int(Date().timeIntervalSince1970),
                             model,
                             version,

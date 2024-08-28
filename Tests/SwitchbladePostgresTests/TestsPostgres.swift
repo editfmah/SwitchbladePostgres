@@ -100,6 +100,113 @@ func initDB(_ config: SwitchbladeConfig? = nil) -> Switchblade {
 
 extension SwitchbladePostgresTests {
     
+    func testPersistScalarValueInt() {
+        
+        let db = initDB()
+        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
+        let id = UUID()
+        let value = Int(1234)
+        
+        if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
+            if let retrievedValue: Int = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+                if retrievedValue == 1234 {
+                    return
+                }
+            }
+        }
+        
+        XCTFail("failed to write a primitive type")
+        
+    }
+    
+    func testPersistScalarValueBool() {
+        let db = initDB()
+        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
+        let id = UUID()
+        let value = true
+        
+        if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
+            if let retrievedValue: Bool = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+                if retrievedValue == true {
+                    return
+                }
+            }
+        }
+        
+        XCTFail("failed to write a primitive type")
+    }
+
+    
+    func testPersistScalarValueDouble() {
+        let db = initDB()
+        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
+        let id = UUID()
+        let value = Double(1234.56)
+        
+        if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
+            if let retrievedValue: Double = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+                if retrievedValue == 1234.56 {
+                    return
+                }
+            }
+        }
+        
+        XCTFail("failed to write a primitive type")
+    }
+
+    
+    func testPersistScalarValueFloat() {
+        let db = initDB()
+        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
+        let id = UUID()
+        let value = Float(1234.56)
+        
+        if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
+            if let retrievedValue: Float = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+                if retrievedValue == 1234.56 {
+                    return
+                }
+            }
+        }
+        
+        XCTFail("failed to write a primitive type")
+    }
+
+    func testPersistScalarValueString() {
+        let db = initDB()
+        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
+        let id = UUID()
+        let value = "Test String"
+        
+        if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
+            if let retrievedValue: String = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+                if retrievedValue == "Test String" {
+                    return
+                }
+            }
+        }
+        
+        XCTFail("failed to write a primitive type")
+    }
+
+    func testPersistScalarValueUUID() {
+        let db = initDB()
+        let partition = "\(UUID().uuidString.lowercased().prefix(8))"
+        let id = UUID()
+        let value = UUID()
+
+        if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
+            if let retrievedValue: UUID = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+                if retrievedValue == value {
+                    return
+                }
+            }
+        }
+
+        XCTFail("failed to write a primitive type")
+    }
+
+    
     func testPersistObject() {
         
         let db = initDB()
