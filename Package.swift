@@ -16,7 +16,7 @@ let package = Package(
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
-        .package(url: "https://github.com/editfmah/switchblade.git", from: "0.0.9"),
+        .package(url: "https://github.com/editfmah/switchblade.git", branch: "master"),
         .package(url: "https://github.com/vapor/postgres-kit.git", from: "2.12.2"),
         .package(url: "https://github.com/krzyzanowskim/CryptoSwift.git", from: "1.8.0"),
     ],

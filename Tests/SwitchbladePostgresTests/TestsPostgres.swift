@@ -87,7 +87,7 @@ func initDB(_ config: SwitchbladeConfig? = nil) -> Switchblade {
         
         let config = SwitchbladeConfig()
         
-        db = try! Switchblade(provider: PostgresProvider(connectionString: "<secret>"))
+        db = try! Switchblade(provider: PostgresProvider(connectionString: "postgresql://battleparty:y9$ZsTm5M_5]@k7n0.your-database.de/battleparty_prod"))
         
         let provider = db.provider as? PostgresProvider
         try? provider?.execute(sql: "DELETE FROM Data;", params: [])
@@ -108,7 +108,7 @@ extension SwitchbladePostgresTests {
         let value = Int(1234)
         
         if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
-            if let retrievedValue: Int = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+            if let retrievedValue: Int = db.get(partition: partition, keyspace: "scalar_test", key: id) {
                 if retrievedValue == 1234 {
                     return
                 }
@@ -126,7 +126,7 @@ extension SwitchbladePostgresTests {
         let value = true
         
         if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
-            if let retrievedValue: Bool = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+            if let retrievedValue: Bool = db.get(partition: partition, keyspace: "scalar_test", key: id) {
                 if retrievedValue == true {
                     return
                 }
@@ -144,7 +144,7 @@ extension SwitchbladePostgresTests {
         let value = Double(1234.56)
         
         if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
-            if let retrievedValue: Double = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+            if let retrievedValue: Double = db.get(partition: partition, keyspace: "scalar_test", key: id) {
                 if retrievedValue == 1234.56 {
                     return
                 }
@@ -162,7 +162,7 @@ extension SwitchbladePostgresTests {
         let value = Float(1234.56)
         
         if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
-            if let retrievedValue: Float = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+            if let retrievedValue: Float = db.get(partition: partition, keyspace: "scalar_test", key: id) {
                 if retrievedValue == 1234.56 {
                     return
                 }
@@ -179,7 +179,7 @@ extension SwitchbladePostgresTests {
         let value = "Test String"
         
         if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
-            if let retrievedValue: String = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+            if let retrievedValue: String = db.get(partition: partition, keyspace: "scalar_test", key: id) {
                 if retrievedValue == "Test String" {
                     return
                 }
@@ -196,7 +196,7 @@ extension SwitchbladePostgresTests {
         let value = UUID()
 
         if db.put(partition: partition, keyspace: "scalar_test", key: id, value) {
-            if let retrievedValue: UUID = db.get(partition: partition, key: id, keyspace: "scalar_test") {
+            if let retrievedValue: UUID = db.get(partition: partition, keyspace: "scalar_test", key: id) {
                 if retrievedValue == value {
                     return
                 }
@@ -292,7 +292,7 @@ extension SwitchbladePostgresTests {
         p1.Name = "Adrian Herridge"
         p1.Age = 40
         if db.put(partition: partition, ttl: nil,p1) {
-            if let retrieved: Person = db.get(partition: partition, key: p1.key, keyspace: p1.keyspace) {
+            if let retrieved: Person = db.get(partition: partition, keyspace: p1.keyspace, key: p1.key) {
                 print("retrieved item with id \(retrieved.PersonId)")
                 return
             } else {
@@ -650,14 +650,14 @@ extension SwitchbladePostgresTests {
         p1.Age = 43
         db.put(partition: partition, ttl: nil,p1)
         
-        if let _: Person = db.get(partition: partition, key: p1.key, keyspace: p1.keyspace) {
+        if let _: Person = db.get(partition: partition, keyspace: p1.keyspace, key: p1.key) {
             
         } else {
             XCTFail("failed to get object from provider")
         }
         
         let db2 = try! Switchblade(provider: UserDefaultsProvider())
-        if let p2: Person = db2.get(key: p1.key, keyspace: p1.keyspace) {
+        if let p2: Person = db2.get(keyspace: p1.keyspace, key: p1.key) {
             print("retrieved record for '\(p2.Name ?? "")'")
         } else {
             XCTFail("failed to get object from provider")
