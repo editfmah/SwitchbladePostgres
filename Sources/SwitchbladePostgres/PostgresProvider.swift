@@ -34,6 +34,8 @@ public class PostgresProvider: DataProvider {
     fileprivate var connections: Int = 2
     fileprivate var ssl: Bool = false
     
+    fileprivate var lock = Mutex()
+    
     fileprivate var db: PostgresConnectionSource!
     
     let decoder: JSONDecoder = JSONDecoder()
@@ -86,7 +88,7 @@ public class PostgresProvider: DataProvider {
         self.db = PostgresConnectionSource(configuration: configuration!)
         self.pool = EventLoopGroupConnectionPool(
             source: db,
-            maxConnectionsPerEventLoop: connections * 16,
+            maxConnectionsPerEventLoop: connections * 2,
             on: self.eventLoopGroup
         )
         
