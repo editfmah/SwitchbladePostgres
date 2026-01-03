@@ -31,7 +31,7 @@ public class PostgresProvider: DataProvider {
     fileprivate var username: String?
     fileprivate var password: String?
     fileprivate var database: String?
-    fileprivate var connections: Int = 2
+    fileprivate var connections: Int = 1
     fileprivate var ssl: Bool = false
     
     fileprivate var lock = Mutex()
@@ -88,7 +88,7 @@ public class PostgresProvider: DataProvider {
         self.db = PostgresConnectionSource(configuration: configuration!)
         self.pool = EventLoopGroupConnectionPool(
             source: db,
-            maxConnectionsPerEventLoop: connections * 2,
+            maxConnectionsPerEventLoop: connections,
             on: self.eventLoopGroup
         )
         
