@@ -16,6 +16,22 @@ var ttl_now: Int {
     }
 }
 
+fileprivate extension PostgresData {
+    init(jsonData: Data?) {
+        if let jsonData = jsonData {
+            
+            let jsonData = [UInt8](jsonData)
+            
+            var buffer = ByteBufferAllocator()
+                .buffer(capacity: jsonData.count)
+            buffer.writeBytes(jsonData)
+            self.init(type: .json, formatCode: .binary, value: buffer)
+        } else {
+            self.init(type: .json, formatCode: .binary, value: nil)
+        }
+    }
+}
+
 internal let kSaltValue = "dfc0e63c6cfd433087055cea149efb1f"
 
 /// Configuration for retry behavior
@@ -296,7 +312,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             return PostgresData(date: value)
         } else if let value = value as? Encodable {
             let v = try? encoder.encode(value)
-            return (try? PostgresData(json: v)) ?? PostgresData.null
+            return (PostgresData(jsonData: v))
         }
         
         return PostgresData.null
@@ -569,10 +585,10 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                                         partition,
                                         keyspace,
                                         id,
-                                        PostgresData(json: object),
+                                        PostgresData(jsonData: object),
                                         ttl == -1 ? nil : (Int(Date().timeIntervalSince1970) + ttl),
                                         Int(Date().timeIntervalSince1970),
-                                        PostgresData(json: object),
+                                        PostgresData(jsonData: object),
                                         ttl == -1 ? nil : (Int(Date().timeIntervalSince1970) + ttl),
                                         Int(Date().timeIntervalSince1970),
                                         model,
