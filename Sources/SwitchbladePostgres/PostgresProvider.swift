@@ -66,7 +66,70 @@ public class PostgresProvider: DataProvider {
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.dataDecodingStrategy = .base64
-        d.dateDecodingStrategy = .iso8601
+        // Use a flexible date decoding strategy that handles multiple formats
+        d.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+
+            // Try decoding as a string first (ISO8601 formats)
+            if let dateString = try? container.decode(String.self) {
+                // Try ISO8601 with fractional seconds
+                let iso8601Formatter = ISO8601DateFormatter()
+                iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let date = iso8601Formatter.date(from: dateString) {
+                    return date
+                }
+
+                // Try ISO8601 without fractional seconds
+                iso8601Formatter.formatOptions = [.withInternetDateTime]
+                if let date = iso8601Formatter.date(from: dateString) {
+                    return date
+                }
+
+                // Try common date formats
+                let dateFormatter = DateFormatter()
+                dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+                dateFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+
+                let formats = [
+                    "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+                    "yyyy-MM-dd'T'HH:mm:ssZ",
+                    "yyyy-MM-dd'T'HH:mm:ss",
+                    "yyyy-MM-dd HH:mm:ss",
+                    "yyyy-MM-dd"
+                ]
+
+                for format in formats {
+                    dateFormatter.dateFormat = format
+                    if let date = dateFormatter.date(from: dateString) {
+                        return date
+                    }
+                }
+
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Cannot decode date string: \(dateString)")
+            }
+
+            // Try decoding as a number (Unix timestamp)
+            if let timestamp = try? container.decode(Double.self) {
+                // Handle both seconds and milliseconds timestamps
+                if timestamp > 1_000_000_000_000 {
+                    // Likely milliseconds (timestamp after year 2001 in ms is > 1 trillion)
+                    return Date(timeIntervalSince1970: timestamp / 1000.0)
+                } else {
+                    // Likely seconds
+                    return Date(timeIntervalSince1970: timestamp)
+                }
+            }
+
+            if let timestamp = try? container.decode(Int.self) {
+                if timestamp > 1_000_000_000_000 {
+                    return Date(timeIntervalSince1970: Double(timestamp) / 1000.0)
+                } else {
+                    return Date(timeIntervalSince1970: Double(timestamp))
+                }
+            }
+
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Cannot decode date from value")
+        }
         return d
     }()
 
@@ -76,6 +139,59 @@ public class PostgresProvider: DataProvider {
         e.dateEncodingStrategy = .iso8601
         return e
     }()
+
+    /// Logs detailed information about a decode error including the raw JSON for debugging
+    private func logDecodeError<T>(_ error: Error, type: T.Type, jsonData: Data?, context: String = "") {
+        let contextPrefix = context.isEmpty ? "" : "[\(context)] "
+        debugPrint("\(contextPrefix)PostgresProvider Error: Failed to decode stored object into type: \(T.self)")
+        debugPrint("\(contextPrefix)Error details: \(error)")
+
+        // Provide detailed breakdown of DecodingError
+        if let decodingError = error as? DecodingError {
+            switch decodingError {
+            case .typeMismatch(let type, let context):
+                debugPrint("\(contextPrefix)  Type mismatch: Expected \(type)")
+                debugPrint("\(contextPrefix)  Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
+                debugPrint("\(contextPrefix)  Description: \(context.debugDescription)")
+            case .valueNotFound(let type, let context):
+                debugPrint("\(contextPrefix)  Value not found: Expected \(type)")
+                debugPrint("\(contextPrefix)  Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
+                debugPrint("\(contextPrefix)  Description: \(context.debugDescription)")
+            case .keyNotFound(let key, let context):
+                debugPrint("\(contextPrefix)  Key not found: \(key.stringValue)")
+                debugPrint("\(contextPrefix)  Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
+                debugPrint("\(contextPrefix)  Description: \(context.debugDescription)")
+            case .dataCorrupted(let context):
+                debugPrint("\(contextPrefix)  Data corrupted")
+                debugPrint("\(contextPrefix)  Coding path: \(context.codingPath.map { $0.stringValue }.joined(separator: "."))")
+                debugPrint("\(contextPrefix)  Description: \(context.debugDescription)")
+            @unknown default:
+                debugPrint("\(contextPrefix)  Unknown decoding error")
+            }
+        }
+
+        // Log the raw JSON for debugging (truncated if too long)
+        if let jsonData = jsonData {
+            if let jsonString = String(data: jsonData, encoding: .utf8) {
+                let maxLength = 2000
+                if jsonString.count > maxLength {
+                    debugPrint("\(contextPrefix)Raw JSON (truncated to \(maxLength) chars): \(String(jsonString.prefix(maxLength)))...")
+                } else {
+                    debugPrint("\(contextPrefix)Raw JSON: \(jsonString)")
+                }
+
+                // Try to pretty-print the JSON for easier debugging
+                if let jsonObject = try? JSONSerialization.jsonObject(with: jsonData, options: []),
+                   let prettyData = try? JSONSerialization.data(withJSONObject: jsonObject, options: [.prettyPrinted, .sortedKeys]),
+                   let prettyString = String(data: prettyData, encoding: .utf8) {
+                    let prettyTruncated = prettyString.count > maxLength ? String(prettyString.prefix(maxLength)) + "..." : prettyString
+                    debugPrint("\(contextPrefix)Pretty JSON:\n\(prettyTruncated)")
+                }
+            } else {
+                debugPrint("\(contextPrefix)Raw JSON bytes (not valid UTF-8): \(jsonData.count) bytes")
+            }
+        }
+    }
 
     var eventLoop: EventLoop { self.eventLoopGroup.next() }
     var eventLoopGroup: EventLoopGroup!
@@ -344,8 +460,10 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         do {
 
             let rows = try queryWithRetry(sql: sql, params: [fromInfo.objectName, fromInfo.version, ttl_now])
+            var failedDecodeCount = 0
+            var migratedCount = 0
 
-            for r in rows {
+            for (index, r) in rows.enumerated() {
                 let partition = r.column("partition")?.string ?? ""
                 let keyspace = r.column("keyspace")?.string ?? ""
                 let id = r.column("id")?.string ?? ""
@@ -355,7 +473,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 }
 
                 if let d = r.column("value")?.json {
-                    if let object = try? decoder.decode(T.self, from: Data(d)) {
+                    let jsonData = Data(d)
+                    do {
+                        let object = try decoder.decode(T.self, from: jsonData)
                         if let newObject = iterator(object) {
                             let _ = self.put(
                                 partition: partition,
@@ -365,10 +485,19 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                                 filter: (newObject as? Filterable)?.filters.dictionary ?? [:],
                                 newObject
                             )
+                            migratedCount += 1
                         }
+                    } catch {
+                        failedDecodeCount += 1
+                        logDecodeError(error, type: T.self, jsonData: jsonData, context: "migrate() row \(index) id=\(id)")
                     }
                 }
             }
+
+            if failedDecodeCount > 0 {
+                debugPrint("[migrate(\(fromInfo.objectName) v\(fromInfo.version))] WARNING: \(failedDecodeCount) of \(rows.count) objects failed to decode")
+            }
+            debugPrint("[migrate(\(fromInfo.objectName) v\(fromInfo.version))] Successfully migrated \(migratedCount) objects")
 
         } catch {
             debugPrint("Migration error: \(error)")
@@ -380,13 +509,23 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
 
         do {
             let rows = try queryWithRetry(sql: sql, params: params)
+            var failedDecodeCount = 0
 
-            for r in rows {
+            for (index, r) in rows.enumerated() {
                 if let d = r.column("value")?.json {
-                    if let object = try? decoder.decode(T.self, from: Data(d)) {
+                    let jsonData = Data(d)
+                    do {
+                        let object = try decoder.decode(T.self, from: jsonData)
                         iterator(object)
+                    } catch {
+                        failedDecodeCount += 1
+                        logDecodeError(error, type: T.self, jsonData: jsonData, context: "iterate() row \(index)")
                     }
                 }
+            }
+
+            if failedDecodeCount > 0 {
+                debugPrint("[iterate()] WARNING: \(failedDecodeCount) of \(rows.count) objects failed to decode into \(T.self)")
             }
 
         } catch {
@@ -531,8 +670,13 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                     sleepMs(delay)
                 }
             } catch {
-                debugPrint("PostgresProvider Error: Failed to decode stored object into type: \(T.self)")
-                debugPrint("Error: \(error)")
+                // Attempt to get the raw JSON data for debugging
+                var jsonData: Data? = nil
+                if let data = try? query(sql: "SELECT value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND id = $3 AND (ttl IS NULL OR ttl >= $4)", params: [partition,keyspace,key,ttl_now]).first,
+                   let objectBytes = data[0]?.json {
+                    jsonData = Data(objectBytes)
+                }
+                logDecodeError(error, type: T.self, jsonData: jsonData, context: "get(partition: \(partition), key: \(key), keyspace: \(keyspace))")
                 return nil
             }
         }
@@ -570,10 +714,27 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
         for attempt in 0..<retryConfig.maxAttempts {
             do {
                 var results: [T] = []
+                var failedDecodeCount = 0
                 let data = try query(sql: "SELECT partition,keyspace,id,value FROM \(dataTableName) WHERE partition = $1 AND keyspace = $2 AND (ttl IS NULL OR ttl >= $3) \(f) ORDER BY timestamp ASC;", params: [partition, keyspace, ttl_now])
-                for d in data.compactMap({ try? $0[3]?.json(as: T.self) }) {
-                    results.append(d)
+
+                for (index, row) in data.enumerated() {
+                    if let jsonBytes = row[3]?.json {
+                        let jsonData = Data(jsonBytes)
+                        do {
+                            let object = try decoder.decode(T.self, from: jsonData)
+                            results.append(object)
+                        } catch {
+                            failedDecodeCount += 1
+                            let rowId = row[2]?.string ?? "unknown"
+                            logDecodeError(error, type: T.self, jsonData: jsonData, context: "all() row \(index) id=\(rowId)")
+                        }
+                    }
                 }
+
+                if failedDecodeCount > 0 {
+                    debugPrint("[all(partition: \(partition), keyspace: \(keyspace))] WARNING: \(failedDecodeCount) of \(data.count) objects failed to decode into \(T.self)")
+                }
+
                 return results
             } catch let error where shouldRetry(error: error) {
                 lastError = error
@@ -582,6 +743,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                     sleepMs(delay)
                 }
             } catch {
+                debugPrint("[all(partition: \(partition), keyspace: \(keyspace))] Query error: \(error)")
                 return []
             }
         }
