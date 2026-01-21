@@ -66,69 +66,34 @@ public class PostgresProvider: DataProvider {
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.dataDecodingStrategy = .base64
-        // Use a flexible date decoding strategy that handles multiple formats
+        // Primary format is ISO8601, with fallback for legacy Unix timestamps
         d.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
 
-            // Try decoding as a string first (ISO8601 formats)
+            // Try ISO8601 string first (primary format)
             if let dateString = try? container.decode(String.self) {
-                // Try ISO8601 with fractional seconds
                 let iso8601Formatter = ISO8601DateFormatter()
                 iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
                 if let date = iso8601Formatter.date(from: dateString) {
                     return date
                 }
-
-                // Try ISO8601 without fractional seconds
                 iso8601Formatter.formatOptions = [.withInternetDateTime]
                 if let date = iso8601Formatter.date(from: dateString) {
                     return date
                 }
-
-                // Try common date formats
-                let dateFormatter = DateFormatter()
-                dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-                dateFormatter.timeZone = TimeZone(secondsFromGMT: 0)
-
-                let formats = [
-                    "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
-                    "yyyy-MM-dd'T'HH:mm:ssZ",
-                    "yyyy-MM-dd'T'HH:mm:ss",
-                    "yyyy-MM-dd HH:mm:ss",
-                    "yyyy-MM-dd"
-                ]
-
-                for format in formats {
-                    dateFormatter.dateFormat = format
-                    if let date = dateFormatter.date(from: dateString) {
-                        return date
-                    }
-                }
-
-                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Cannot decode date string: \(dateString)")
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO8601 date string: \(dateString)")
             }
 
-            // Try decoding as a number (Unix timestamp)
+            // Fallback: Unix timestamp as number (legacy data support)
             if let timestamp = try? container.decode(Double.self) {
-                // Handle both seconds and milliseconds timestamps
+                // Timestamps > 1 trillion are likely milliseconds
                 if timestamp > 1_000_000_000_000 {
-                    // Likely milliseconds (timestamp after year 2001 in ms is > 1 trillion)
                     return Date(timeIntervalSince1970: timestamp / 1000.0)
-                } else {
-                    // Likely seconds
-                    return Date(timeIntervalSince1970: timestamp)
                 }
+                return Date(timeIntervalSince1970: timestamp)
             }
 
-            if let timestamp = try? container.decode(Int.self) {
-                if timestamp > 1_000_000_000_000 {
-                    return Date(timeIntervalSince1970: Double(timestamp) / 1000.0)
-                } else {
-                    return Date(timeIntervalSince1970: Double(timestamp))
-                }
-            }
-
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Cannot decode date from value")
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Date must be ISO8601 string or Unix timestamp")
         }
         return d
     }()
