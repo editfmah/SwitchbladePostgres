@@ -79,8 +79,47 @@ public class PostgresProvider: DataProvider {
     
     fileprivate var db: PostgresConnectionSource!
     
-    private let decoder: JSONDecoder = JSONDecoder()
-    private let encoder: JSONEncoder = JSONEncoder()
+    private let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dataDecodingStrategy = .base64
+        // Primary format is ISO8601, with fallback for legacy Unix timestamps
+        d.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            
+            // Try ISO8601 string first (primary format)
+            if let dateString = try? container.decode(String.self) {
+                let iso8601Formatter = ISO8601DateFormatter()
+                iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let date = iso8601Formatter.date(from: dateString) {
+                    return date
+                }
+                iso8601Formatter.formatOptions = [.withInternetDateTime]
+                if let date = iso8601Formatter.date(from: dateString) {
+                    return date
+                }
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO8601 date string: \(dateString)")
+            }
+            
+            // Fallback: Unix timestamp as number (legacy data support)
+            if let timestamp = try? container.decode(Double.self) {
+                // Timestamps > 1 trillion are likely milliseconds
+                if timestamp > 1_000_000_000_000 {
+                    return Date(timeIntervalSince1970: timestamp / 1000.0)
+                }
+                return Date(timeIntervalSince1970: timestamp)
+            }
+            
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Date must be ISO8601 string or Unix timestamp")
+        }
+        return d
+    }()
+    
+    private let encoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.dataEncodingStrategy = .base64
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }()
     
     /// Logs detailed information about a decode error including the raw JSON for debugging
     private func logDecodeError<T>(_ error: Error, type: T.Type, jsonData: Data?, context: String = "") {
@@ -159,8 +198,6 @@ public class PostgresProvider: DataProvider {
     
     public func open() throws {
         lock.lock()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        encoder.dateEncodingStrategy = .secondsSince1970
         defer { lock.unlock() }
         
         guard !isOpen else { return }
