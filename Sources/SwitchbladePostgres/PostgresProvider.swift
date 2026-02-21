@@ -10,6 +10,12 @@ import Dispatch
 import PostgresKit
 import Switchblade
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
 var ttl_now: Int {
     get {
         return Int(Date().timeIntervalSince1970)
@@ -162,8 +168,12 @@ public class PostgresProvider: DataProvider {
         decoder.dateDecodingStrategy = .secondsSince1970
         encoder.dateEncodingStrategy = .secondsSince1970
         defer { lock.unlock() }
-        
+
         guard !isOpen else { return }
+
+        // Ignore SIGPIPE to prevent termination when writing to a closed socket.
+        // This is critical — without it, a broken PostgreSQL connection kills the process.
+        signal(SIGPIPE, SIG_IGN)
         
         var configuration: PostgresConfiguration!
         if let connectionString = connectionString {
@@ -221,10 +231,16 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     }
     
     private func ttlCleanupLoop() {
+        guard isOpen, pool != nil else { return }
+
+        do {
+            try executeWithRetry(sql: "DELETE FROM \(dataTableName) WHERE ttl IS NOT NULL AND ttl < $1;", params: [ttl_now])
+        } catch {
+            debugPrint("PostgresProvider: TTL cleanup failed: \(error)")
+        }
+
         guard isOpen else { return }
-        
-        try? executeWithRetry(sql: "DELETE FROM \(dataTableName) WHERE ttl IS NOT NULL AND ttl < $1;", params: [ttl_now])
-        
+
         let workItem = DispatchWorkItem { [weak self] in
             self?.ttlCleanupLoop()
         }
@@ -235,15 +251,25 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     public func close() throws {
         lock.lock()
         defer { lock.unlock() }
-        
+
         guard isOpen else { return }
         isOpen = false
-        
+
         ttlCleanupWorkItem?.cancel()
         ttlCleanupWorkItem = nil
-        
-        pool.shutdown()
-        try? eventLoopGroup.syncShutdownGracefully()
+
+        if let pool = self.pool {
+            pool.shutdown()
+            self.pool = nil
+        }
+        if let eventLoopGroup = self.eventLoopGroup {
+            do {
+                try eventLoopGroup.syncShutdownGracefully()
+            } catch {
+                debugPrint("PostgresProvider: eventLoopGroup shutdown error: \(error)")
+            }
+            self.eventLoopGroup = nil
+        }
         db = nil
     }
     
@@ -304,6 +330,9 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             "connection refused",
             "connection closed",
             "broken pipe",
+            "sigpipe",
+            "signal 13",
+            "epipe",
             "timed out",
             "timeout",
             "too many connections",
@@ -318,6 +347,11 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
             "try again",
             "deadlock",
             "serialization failure",
+            "unclean shutdown",
+            "channel inactive",
+            "alreadyclosed",
+            "i/o error",
+            "ioerror",
             "40001",
             "40p01",
             "53300",
@@ -343,8 +377,11 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     fileprivate func executeWithRetry(sql: String, params: [Any?]) throws {
         let values = makeParams(params)
         var lastError: Error?
-        
+
         for attempt in 0..<retryConfig.maxAttempts {
+            guard isOpen, let pool = self.pool else {
+                throw DatabaseError.Execute(.SyntaxError("Connection pool is not available"))
+            }
             do {
                 _ = try pool.withConnection { conn in
                     return conn.query(sql, values)
@@ -352,7 +389,8 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 return
             } catch {
                 lastError = error
-                
+                debugPrint("PostgresProvider: executeWithRetry attempt \(attempt + 1)/\(retryConfig.maxAttempts) failed: \(error)")
+
                 if attempt < retryConfig.maxAttempts - 1 && shouldRetry(error: error) {
                     let delay = calculateDelay(attempt: attempt)
                     sleepMs(delay)
@@ -361,7 +399,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 }
             }
         }
-        
+
         if let error = lastError {
             throw DatabaseError.Execute(.SyntaxError("\(error)"))
         }
@@ -370,8 +408,11 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
     fileprivate func queryWithRetry(sql: String, params: [Any?]) throws -> [PostgresRow] {
         let values = makeParams(params)
         var lastError: Error?
-        
+
         for attempt in 0..<retryConfig.maxAttempts {
+            guard isOpen, let pool = self.pool else {
+                throw DatabaseError.Execute(.SyntaxError("Connection pool is not available"))
+            }
             do {
                 let result = try pool.withConnection { conn in
                     return conn.query(sql, values)
@@ -379,7 +420,8 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 return result.rows
             } catch {
                 lastError = error
-                
+                debugPrint("PostgresProvider: queryWithRetry attempt \(attempt + 1)/\(retryConfig.maxAttempts) failed: \(error)")
+
                 if attempt < retryConfig.maxAttempts - 1 && shouldRetry(error: error) {
                     let delay = calculateDelay(attempt: attempt)
                     sleepMs(delay)
@@ -388,7 +430,7 @@ CREATE TABLE IF NOT EXISTS \(dataTableName) (
                 }
             }
         }
-        
+
         throw lastError ?? DatabaseError.Execute(.SyntaxError("Unknown error"))
     }
     
